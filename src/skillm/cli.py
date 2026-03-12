@@ -134,27 +134,62 @@ def library_check():
 
 # ── Skill Operations ───────────────────────────────────────
 
-@cli.command()
+@cli.command("add")
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
 @click.option("--version", default=None, help="Explicit version (default: auto-increment)")
 @click.option("-c", "--category", default=None, help="Set skill category")
-def publish(source: str, name: str | None, version: str | None, category: str | None):
-    """Publish a skill directory to the library."""
+def add_cmd(source: str, name: str | None, version: str | None, category: str | None):
+    """Add a skill directory to the library."""
+    from .metadata import extract_metadata
+    from .scan import scan_skill_content, diff_requires
+
     lib = _get_library()
-    skill_name, ver = lib.publish(Path(source), name=name, version=version)
+
+    # Auto-scan before publishing to suggest missing requirements
+    source_path = Path(source)
+    try:
+        meta = extract_metadata(source_path)
+        detected = scan_skill_content(meta.content)
+        missing = diff_requires(meta.requires, detected)
+        if missing.has_findings:
+            console.print("[yellow]Detected requirements not in frontmatter:[/yellow]")
+            if missing.bins:
+                console.print(f"  bins: {missing.bins}")
+            if missing.packages:
+                console.print(f"  packages: {missing.packages}")
+            if missing.env:
+                console.print(f"  env: {missing.env}")
+            console.print("[dim]Consider adding these to your SKILL.md frontmatter.[/dim]")
+    except (FileNotFoundError, Exception):
+        pass  # Don't block publish if scanning fails
+
+    skill_name, ver = lib.publish(source_path, name=name, version=version)
     if category:
         skill = lib.info(skill_name)
         if skill:
             skill.category = category.strip().lower()
             lib.db.update_skill(skill)
-    console.print(f"[green]Published {skill_name}@{ver}[/green]")
+    console.print(f"[green]Added {skill_name}@{ver} to library[/green]")
 
 
-@cli.command()
+@cli.command("update")
+@click.argument("source", type=click.Path(exists=True))
+@click.option("--name", default=None, help="Override skill name")
+def update_cmd(source: str, name: str | None):
+    """Update the latest version of an existing skill in the library."""
+    lib = _get_library()
+    try:
+        skill_name, ver = lib.override(Path(source), name=name)
+        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@cli.command("rm")
 @click.argument("name")
 @click.option("--version", default=None, help="Remove specific version only")
-def remove(name: str, version: str | None):
+def rm_cmd(name: str, version: str | None):
     """Remove a skill from the library."""
     lib = _get_library()
     if lib.remove(name, version=version):
@@ -378,11 +413,11 @@ def project_init():
     console.print("[green]Project initialized — created skills.json and .skills/[/green]")
 
 
-@cli.command()
+@cli.command("install")
 @click.argument("name")
 @click.option("--pin", is_flag=True, help="Pin to this version")
-def add(name: str, pin: bool):
-    """Add a skill from the library to this project."""
+def install_cmd(name: str, pin: bool):
+    """Install a skill from the library into this project."""
     # Parse name@version
     version = None
     if "@" in name:
@@ -390,7 +425,7 @@ def add(name: str, pin: bool):
 
     project = _get_project()
     ver = project.add(name, version=version, pin=pin)
-    console.print(f"[green]Added {name}@{ver}[/green]")
+    console.print(f"[green]Installed {name}@{ver}[/green]")
 
     # Run env check and warn
     from .check import check_requirements
@@ -406,13 +441,13 @@ def add(name: str, pin: bool):
                     console.print(f"  [red]✗[/red] {r.name} — {r.message}")
 
 
-@cli.command()
+@cli.command("uninstall")
 @click.argument("name")
-def drop(name: str):
-    """Remove a skill from this project."""
+def uninstall_cmd(name: str):
+    """Uninstall a skill from this project."""
     project = _get_project()
     if project.drop(name):
-        console.print(f"[green]Dropped {name}[/green]")
+        console.print(f"[green]Uninstalled {name}[/green]")
     else:
         console.print(f"[red]Skill '{name}' not in project[/red]")
 
@@ -462,10 +497,12 @@ def _print_check_report(report):
 
 @cli.command("check")
 @click.argument("name")
-def check_cmd(name: str):
+@click.option("--scan/--no-scan", default=True, help="Auto-scan content for undeclared requirements")
+def check_cmd(name: str, scan: bool):
     """Check if a skill's requirements are met on this machine."""
     from .check import check_requirements
     from .metadata import extract_metadata
+    from .scan import scan_skill_content, diff_requires
 
     lib = _get_library()
     skill = lib.info(name)
@@ -482,16 +519,52 @@ def check_cmd(name: str):
     skill_dir = lib.get_skill_files_path(name, latest.version)
     meta = extract_metadata(skill_dir)
 
+    # Check declared requirements
+    requires = meta.requires
     console.print(f"[bold]{name}[/bold] environment check:")
-    report = check_requirements(name, meta.requires)
+
+    if scan:
+        # Auto-scan content and merge with declared
+        detected = scan_skill_content(meta.content)
+        missing = diff_requires(requires, detected)
+
+        if missing.has_findings:
+            # Merge detected into requires for checking
+            if not isinstance(requires, dict):
+                requires = {"bins": requires} if requires else {}
+            merged = dict(requires)
+            if missing.bins:
+                merged["bins"] = list(set(merged.get("bins", []) + missing.bins))
+            if missing.packages:
+                merged["packages"] = list(set(merged.get("packages", []) + missing.packages))
+            if missing.env:
+                merged["env"] = list(set(merged.get("env", []) + missing.env))
+            requires = merged
+
+    report = check_requirements(name, requires)
     _print_check_report(report)
+
+    if scan:
+        detected = scan_skill_content(meta.content)
+        missing = diff_requires(meta.requires, detected)
+        if missing.has_findings:
+            console.print()
+            console.print("  [dim]Auto-detected (not in frontmatter):[/dim]")
+            if missing.bins:
+                console.print(f"    bins: {missing.bins}")
+            if missing.packages:
+                console.print(f"    packages: {missing.packages}")
+            if missing.env:
+                console.print(f"    env: {missing.env}")
 
 
 @cli.command("doctor")
-def doctor_cmd():
+@click.option("--scan/--no-scan", default=True, help="Auto-scan content for undeclared requirements")
+def doctor_cmd(scan: bool):
     """Check requirements for all installed project skills."""
     from .check import check_requirements
     from .metadata import extract_metadata
+    from .scan import scan_skill_content, diff_requires
 
     project = _get_project()
     manifest = project.list_skills()
@@ -509,9 +582,38 @@ def doctor_cmd():
             continue
 
         meta = extract_metadata(skill_dir)
+        requires = meta.requires
+
+        if scan:
+            detected = scan_skill_content(meta.content)
+            missing = diff_requires(requires, detected)
+            if missing.has_findings:
+                if not isinstance(requires, dict):
+                    requires = {"bins": requires} if requires else {}
+                merged = dict(requires)
+                if missing.bins:
+                    merged["bins"] = list(set(merged.get("bins", []) + missing.bins))
+                if missing.packages:
+                    merged["packages"] = list(set(merged.get("packages", []) + missing.packages))
+                if missing.env:
+                    merged["env"] = list(set(merged.get("env", []) + missing.env))
+                requires = merged
+
         console.print(f"[bold]{skill_name}[/bold]:")
-        report = check_requirements(skill_name, meta.requires)
+        report = check_requirements(skill_name, requires)
         _print_check_report(report)
+
+        if scan:
+            detected = scan_skill_content(meta.content)
+            missing_fm = diff_requires(meta.requires, detected)
+            if missing_fm.has_findings:
+                console.print("  [dim]Auto-detected (not in frontmatter):[/dim]")
+                if missing_fm.bins:
+                    console.print(f"    bins: {missing_fm.bins}")
+                if missing_fm.packages:
+                    console.print(f"    packages: {missing_fm.packages}")
+                if missing_fm.env:
+                    console.print(f"    env: {missing_fm.env}")
 
         if not report.all_ok:
             all_ok = False

@@ -52,6 +52,34 @@ def test_remove_version(tmp_library, sample_skill):
     assert len(skill.versions) == 1
 
 
+def test_override(tmp_library, sample_skill, tmp_path):
+    tmp_library.publish(sample_skill)
+    skill = tmp_library.info("my-skill")
+    assert len(skill.versions) == 1
+    assert skill.versions[0].version == "v1"
+
+    # Modify the skill content
+    (sample_skill / "SKILL.md").write_text(
+        "# My Skill\n\nUpdated description.\n\n"
+        "<!-- skillm:meta\ntags: test, updated\nauthor: tester\n-->\n"
+    )
+    (sample_skill / "extra.txt").write_text("new file\n")
+
+    name, ver = tmp_library.override(sample_skill)
+    assert name == "my-skill"
+    assert ver == "v1"  # same version string
+
+    skill = tmp_library.info("my-skill")
+    assert len(skill.versions) == 1  # still one version
+    assert skill.description == "Updated description."
+
+
+def test_override_nonexistent(tmp_library, sample_skill):
+    import pytest
+    with pytest.raises(ValueError, match="not found"):
+        tmp_library.override(sample_skill)
+
+
 def test_search(tmp_library, sample_skill):
     tmp_library.publish(sample_skill)
     results = tmp_library.search("test")

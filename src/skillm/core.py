@@ -119,6 +119,70 @@ class Library:
 
         return skill_name, version
 
+    def override(self, source_dir: Path, name: str | None = None) -> tuple[str, str]:
+        """Override the latest version of an existing skill. Returns (name, version).
+
+        Raises ValueError if skill does not exist or has no versions.
+        """
+        source_dir = source_dir.resolve()
+        meta = extract_metadata(source_dir, name_override=name)
+        skill_name = meta.name
+
+        skill = self.db.get_skill(skill_name)
+        if skill is None:
+            raise ValueError(f"Skill '{skill_name}' not found in library")
+
+        latest = self.db.get_latest_version(skill.id)
+        if latest is None:
+            raise ValueError(f"No versions found for '{skill_name}'")
+
+        version = latest.version
+
+        # Remove old version data (cascades to files table)
+        self.db.delete_version(skill.id, version)
+        self.backend.remove_skill_files(skill_name, version)
+
+        now = datetime.now(timezone.utc).isoformat()
+
+        # Update skill metadata
+        skill.description = meta.description
+        skill.category = meta.category or skill.category
+        skill.author = meta.author
+        skill.updated_at = now
+        self.db.update_skill(skill)
+
+        # Collect file info
+        files = list(source_dir.rglob("*"))
+        files = [f for f in files if f.is_file()]
+        total_size = sum(f.stat().st_size for f in files)
+
+        # Re-create version record with same version string
+        ver_id = self.db.insert_version(Version(
+            skill_id=skill.id,
+            version=version,
+            file_count=len(files),
+            total_size=total_size,
+            published_at=now,
+        ))
+
+        for f in files:
+            rel = f.relative_to(source_dir)
+            file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
+            self.db.insert_file(FileRecord(
+                version_id=ver_id,
+                rel_path=str(rel),
+                size=f.stat().st_size,
+                sha256=file_hash,
+            ))
+
+        self.backend.put_skill_files(skill_name, version, source_dir)
+
+        if meta.tags:
+            self.db.set_tags(skill.id, meta.tags)
+        self.db.update_search_content(skill.id, meta.content)
+
+        return skill_name, version
+
     def remove(self, name: str, version: str | None = None) -> bool:
         """Remove a skill (or specific version) from the library."""
         skill = self.db.get_skill(name)

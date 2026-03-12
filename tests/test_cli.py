@@ -39,7 +39,7 @@ def test_library_init(tmp_path, monkeypatch):
     assert (lib_path / "library.db").exists()
 
 
-def test_publish_and_list(tmp_path, monkeypatch):
+def test_add_and_list(tmp_path, monkeypatch):
     lib_path = _init_library(tmp_path)
     skill_dir = _create_skill(tmp_path)
 
@@ -56,7 +56,7 @@ def test_publish_and_list(tmp_path, monkeypatch):
 
     runner = CliRunner()
 
-    result = runner.invoke(cli, ["publish", str(skill_dir)])
+    result = runner.invoke(cli, ["add", str(skill_dir)])
     assert result.exit_code == 0
     assert "test-skill" in result.output
 
