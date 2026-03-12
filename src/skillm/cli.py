@@ -12,7 +12,7 @@ from rich.table import Table
 
 from . import __version__
 from .config import Config, load_config
-from .core import Library, Project
+from .core import Library, Project, get_active_library
 from .inject import inject as inject_skills
 from .skillpack import export_skill, import_skillpack
 
@@ -21,7 +21,7 @@ console = Console()
 
 def _get_library() -> Library:
     try:
-        return Library()
+        return get_active_library()
     except Exception:
         console.print("[red]Library not initialized. Run 'skillm library init' first.[/red]")
         sys.exit(1)
@@ -132,22 +132,131 @@ def library_check():
         console.print("[green]Library OK — DB matches disk.[/green]")
 
 
+@library.command("snapshots")
+def library_snapshots():
+    """List database snapshots."""
+    from .snapshot import list_snapshots
+    lib = _get_library()
+    snaps = list_snapshots(lib.config.library_path)
+
+    if not snaps:
+        console.print("[dim]No snapshots.[/dim]")
+        return
+
+    for i, (path, ts) in enumerate(snaps):
+        size = _format_size(path.stat().st_size)
+        marker = " [green]← latest[/green]" if i == 0 else ""
+        console.print(f"  {path.name}  {ts}  ({size}){marker}")
+
+
+@library.command("rollback")
+@click.argument("snapshot", required=False)
+def library_rollback(snapshot: str | None):
+    """Rollback the database to a snapshot.
+
+    Without arguments, rolls back to the most recent snapshot.
+    Pass a snapshot filename to restore a specific one.
+    """
+    from .snapshot import list_snapshots, rollback, snapshot_dir
+
+    lib = _get_library()
+    snap_path = None
+    if snapshot:
+        snap_path = snapshot_dir(lib.config.library_path) / snapshot
+        if not snap_path.exists():
+            console.print(f"[red]Snapshot not found: {snapshot}[/red]")
+            return
+
+    try:
+        restored = rollback(lib.config.library_path, snap_path)
+        console.print(f"[green]Rolled back to {restored.name}[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+# ── Remote Management ─────────────────────────────────────
+
+@cli.group()
+def remote():
+    """Manage remote libraries."""
+
+
+@remote.command("add")
+@click.argument("name")
+@click.argument("path")
+def remote_add(name: str, path: str):
+    """Add a remote library.
+
+    \b
+    PATH can be:
+      /path/to/library           Local path
+      ssh://user@host:/path      SSH remote
+    """
+    from .remote import add_remote
+    config = add_remote(name, path)
+    console.print(f"[green]Added remote '{name}' → {path}[/green]")
+    if config.active == name:
+        console.print(f"[dim]Active remote: {name}[/dim]")
+
+
+@remote.command("rm")
+@click.argument("name")
+def remote_rm(name: str):
+    """Remove a remote library."""
+    from .remote import remove_remote
+    try:
+        config = remove_remote(name)
+        console.print(f"[green]Removed remote '{name}'[/green]")
+        console.print(f"[dim]Active remote: {config.active}[/dim]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@remote.command("switch")
+@click.argument("name")
+def remote_switch(name: str):
+    """Switch the active remote library."""
+    from .remote import switch_remote
+    try:
+        switch_remote(name)
+        console.print(f"[green]Switched to '{name}'[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@remote.command("list")
+def remote_list():
+    """List all remote libraries."""
+    from .remote import load_remotes
+    config = load_remotes()
+
+    if not config.remotes:
+        console.print("[dim]No remotes configured.[/dim]")
+        return
+
+    for name, r in sorted(config.remotes.items()):
+        marker = " [green]← active[/green]" if name == config.active else ""
+        kind = "ssh" if r.is_ssh else "local"
+        console.print(f"  [bold]{name}[/bold] ({kind}) {r.path}{marker}")
+
+
 # ── Skill Operations ───────────────────────────────────────
 
 @cli.command("add")
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
-@click.option("--version", default=None, help="Explicit version (default: auto-increment)")
+@click.option("--new-version", is_flag=True, help="Force create a new version even if skill exists")
+@click.option("--version", default=None, help="Explicit version string")
 @click.option("-c", "--category", default=None, help="Set skill category")
-def add_cmd(source: str, name: str | None, version: str | None, category: str | None):
-    """Add a skill directory to the library."""
+def add_cmd(source: str, name: str | None, new_version: bool, version: str | None, category: str | None):
+    """Add a skill to the library. Updates in-place if it already exists."""
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
     lib = _get_library()
-
-    # Auto-scan before publishing to suggest missing requirements
     source_path = Path(source)
+
+    # Auto-scan to suggest missing requirements
     try:
         meta = extract_metadata(source_path)
         detected = scan_skill_content(meta.content)
@@ -162,28 +271,24 @@ def add_cmd(source: str, name: str | None, version: str | None, category: str | 
                 console.print(f"  env: {missing.env}")
             console.print("[dim]Consider adding these to your SKILL.md frontmatter.[/dim]")
     except (FileNotFoundError, Exception):
-        pass  # Don't block publish if scanning fails
+        pass
 
-    skill_name, ver = lib.publish(source_path, name=name, version=version)
+    # If skill exists and not forcing new version, update in-place
+    resolved_name = name or extract_metadata(source_path).name
+    existing = lib.info(resolved_name)
+
+    if existing and not new_version and version is None:
+        skill_name, ver = lib.override(source_path, name=name)
+        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
+    else:
+        skill_name, ver = lib.publish(source_path, name=name, version=version)
+        console.print(f"[green]Added {skill_name}@{ver} to library[/green]")
+
     if category:
         skill = lib.info(skill_name)
         if skill:
             skill.category = category.strip().lower()
             lib.db.update_skill(skill)
-    console.print(f"[green]Added {skill_name}@{ver} to library[/green]")
-
-
-@cli.command("update")
-@click.argument("source", type=click.Path(exists=True))
-@click.option("--name", default=None, help="Override skill name")
-def update_cmd(source: str, name: str | None):
-    """Update the latest version of an existing skill in the library."""
-    lib = _get_library()
-    try:
-        skill_name, ver = lib.override(Path(source), name=name)
-        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
 
 
 @cli.command("rm")

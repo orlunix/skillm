@@ -10,13 +10,39 @@ from pathlib import Path
 
 from .backends.base import LibraryBackend
 from .backends.local import LocalBackend
+from .backends.ssh import SSHBackend
 from .config import Config, load_config, save_config
 from .db import Database
 from .metadata import extract_metadata
 from .models import FileRecord, Skill, Version
+from .remote import Remote, load_remotes
+from .snapshot import create_snapshot
 
 SKILLS_JSON = "skills.json"
 SKILLS_DIR = ".skills"
+
+
+def create_library_from_remote(remote: Remote) -> "Library":
+    """Create a Library instance from a Remote."""
+    config = Config()
+    if remote.is_ssh:
+        config.library.backend = "ssh"
+        host, path = remote.parse_ssh()
+        config.library.host = host
+        config.library.path = path
+    else:
+        config.library.backend = "local"
+        config.library.path = remote.path
+    return Library(config)
+
+
+def get_active_library() -> "Library":
+    """Create a Library from the currently active remote."""
+    remotes = load_remotes()
+    active = remotes.get_active()
+    if active is None:
+        return Library()
+    return create_library_from_remote(active)
 
 
 class Library:
@@ -32,7 +58,13 @@ class Library:
             return LocalBackend(self.config.library_path)
         if self.config.library.backend == "file":
             return LocalBackend(Path(self.config.library.path).expanduser())
+        if self.config.library.backend == "ssh":
+            return SSHBackend(self.config.library.host, self.config.library.path)
         raise ValueError(f"Unknown backend: {self.config.library.backend}")
+
+    def _snapshot(self) -> None:
+        """Create a DB snapshot before write operations."""
+        create_snapshot(self.config.library_path)
 
     def init(self) -> None:
         """Initialize a new library."""
@@ -49,6 +81,7 @@ class Library:
         source: str | None = None,
     ) -> tuple[str, str]:
         """Publish a skill directory to the library. Returns (name, version)."""
+        self._snapshot()
         source_dir = source_dir.resolve()
         meta = extract_metadata(source_dir, name_override=name)
         skill_name = meta.name
@@ -124,6 +157,7 @@ class Library:
 
         Raises ValueError if skill does not exist or has no versions.
         """
+        self._snapshot()
         source_dir = source_dir.resolve()
         meta = extract_metadata(source_dir, name_override=name)
         skill_name = meta.name
@@ -185,6 +219,7 @@ class Library:
 
     def remove(self, name: str, version: str | None = None) -> bool:
         """Remove a skill (or specific version) from the library."""
+        self._snapshot()
         skill = self.db.get_skill(name)
         if skill is None:
             return False
