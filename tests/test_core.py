@@ -12,7 +12,7 @@ def test_library_init(tmp_library):
 def test_publish_and_info(tmp_library, sample_skill):
     name, ver = tmp_library.publish(sample_skill)
     assert name == "my-skill"
-    assert ver == "v1"
+    assert ver == "v0.1"
 
     skill = tmp_library.info("my-skill")
     assert skill is not None
@@ -25,7 +25,7 @@ def test_publish_and_info(tmp_library, sample_skill):
 def test_publish_auto_increment(tmp_library, sample_skill):
     tmp_library.publish(sample_skill)
     _, ver2 = tmp_library.publish(sample_skill)
-    assert ver2 == "v2"
+    assert ver2 == "v0.2"
 
     skill = tmp_library.info("my-skill")
     assert len(skill.versions) == 2
@@ -46,7 +46,7 @@ def test_remove_version(tmp_library, sample_skill):
     tmp_library.publish(sample_skill)
     tmp_library.publish(sample_skill)
 
-    assert tmp_library.remove("my-skill", version="v1")
+    assert tmp_library.remove("my-skill", version="v0.1")
     skill = tmp_library.info("my-skill")
     assert skill is not None
     assert len(skill.versions) == 1
@@ -56,7 +56,7 @@ def test_override(tmp_library, sample_skill, tmp_path):
     tmp_library.publish(sample_skill)
     skill = tmp_library.info("my-skill")
     assert len(skill.versions) == 1
-    assert skill.versions[0].version == "v1"
+    assert skill.versions[0].version == "v0.1"
 
     # Modify the skill content
     (sample_skill / "SKILL.md").write_text(
@@ -67,7 +67,7 @@ def test_override(tmp_library, sample_skill, tmp_path):
 
     name, ver = tmp_library.override(sample_skill)
     assert name == "my-skill"
-    assert ver == "v1"  # same version string
+    assert ver == "v0.1"  # same version string
 
     skill = tmp_library.info("my-skill")
     assert len(skill.versions) == 1  # still one version
@@ -78,6 +78,19 @@ def test_override_nonexistent(tmp_library, sample_skill):
     import pytest
     with pytest.raises(ValueError, match="not found"):
         tmp_library.override(sample_skill)
+
+
+def test_publish_major_bump(tmp_library, sample_skill):
+    _, v1 = tmp_library.publish(sample_skill)
+    assert v1 == "v0.1"
+    _, v2 = tmp_library.publish(sample_skill)
+    assert v2 == "v0.2"
+    _, v3 = tmp_library.publish(sample_skill, major=True)
+    assert v3 == "v1.0"
+    _, v4 = tmp_library.publish(sample_skill)
+    assert v4 == "v1.1"
+    _, v5 = tmp_library.publish(sample_skill, major=True)
+    assert v5 == "v2.0"
 
 
 def test_search(tmp_library, sample_skill):
@@ -115,7 +128,7 @@ def test_project_add_drop(tmp_project, sample_skill):
     tmp_project.library.publish(sample_skill)
 
     ver = tmp_project.add("my-skill")
-    assert ver == "v1"
+    assert ver == "v0.1"
     assert (tmp_project.skills_dir / "my-skill" / "SKILL.md").exists()
 
     manifest = tmp_project.list_skills()
@@ -147,7 +160,7 @@ def test_project_upgrade(tmp_project, sample_skill):
 
     upgraded = tmp_project.upgrade()
     assert len(upgraded) == 1
-    assert upgraded[0] == ("my-skill", "v1", "v2")
+    assert upgraded[0] == ("my-skill", "v0.1", "v0.2")
 
 
 def test_project_enable_disable(tmp_project, sample_skill):

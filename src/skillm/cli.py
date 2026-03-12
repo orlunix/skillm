@@ -245,11 +245,11 @@ def remote_list():
 @cli.command("add")
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
-@click.option("--new-version", is_flag=True, help="Force create a new version even if skill exists")
+@click.option("--major", is_flag=True, help="Bump major version (v1.0 → v2.0)")
 @click.option("--version", default=None, help="Explicit version string")
 @click.option("-c", "--category", default=None, help="Set skill category")
-def add_cmd(source: str, name: str | None, new_version: bool, version: str | None, category: str | None):
-    """Add a skill to the library. Updates in-place if it already exists."""
+def add_cmd(source: str, name: str | None, major: bool, version: str | None, category: str | None):
+    """Add a skill to the library. Creates a new minor version by default."""
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
@@ -273,22 +273,15 @@ def add_cmd(source: str, name: str | None, new_version: bool, version: str | Non
     except (FileNotFoundError, Exception):
         pass
 
-    # If skill exists and not forcing new version, update in-place
-    resolved_name = name or extract_metadata(source_path).name
-    existing = lib.info(resolved_name)
-
-    if existing and not new_version and version is None:
-        skill_name, ver = lib.override(source_path, name=name)
-        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
-    else:
-        skill_name, ver = lib.publish(source_path, name=name, version=version)
-        console.print(f"[green]Added {skill_name}@{ver} to library[/green]")
+    skill_name, ver = lib.publish(source_path, name=name, version=version, major=major)
 
     if category:
         skill = lib.info(skill_name)
         if skill:
             skill.category = category.strip().lower()
             lib.db.update_skill(skill)
+
+    console.print(f"[green]Added {skill_name}@{ver}[/green]")
 
 
 @cli.command("rm")

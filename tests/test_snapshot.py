@@ -1,8 +1,12 @@
 """Tests for database snapshot management."""
 
 import pytest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from skillm.snapshot import create_snapshot, list_snapshots, rollback, _prune
+from skillm.snapshot import (
+    create_snapshot, list_snapshots, rollback, _prune,
+    snapshot_dir, MIN_KEEP, MAX_AGE_DAYS, MAX_TOTAL_BYTES,
+)
 
 
 def _make_library(tmp_path):
@@ -75,16 +79,64 @@ def test_rollback_no_snapshots(tmp_path):
         rollback(lib_path)
 
 
-def test_prune(tmp_path):
+def test_prune_keeps_min(tmp_path):
+    """Always keeps at least MIN_KEEP snapshots even if old."""
     lib_path, db = _make_library(tmp_path)
 
-    # Create 15 snapshots
+    # Create 15 snapshots (all recent, all small)
     for i in range(15):
         db.write_text(f"v{i}")
-        create_snapshot(lib_path, max_keep=10)
+        create_snapshot(lib_path)
 
     snaps = list_snapshots(lib_path)
-    assert len(snaps) <= 10
+    # All recent and small — should keep all 15 (under size/age limits)
+    assert len(snaps) >= MIN_KEEP
+
+
+def test_prune_by_age(tmp_path, monkeypatch):
+    """Snapshots older than MAX_AGE_DAYS are removed (beyond MIN_KEEP)."""
+    lib_path, db = _make_library(tmp_path)
+    snap_d = snapshot_dir(lib_path)
+    snap_d.mkdir(parents=True, exist_ok=True)
+
+    # Create 15 snapshots with fake old timestamps
+    old_time = datetime.now(timezone.utc) - timedelta(days=MAX_AGE_DAYS + 5)
+    for i in range(15):
+        ts = (old_time + timedelta(seconds=i)).strftime("%Y%m%dT%H%M%S%fZ")
+        (snap_d / f"library.db.{ts}").write_text(f"old{i}")
+
+    # Create 3 recent ones
+    for i in range(3):
+        db.write_text(f"new{i}")
+        create_snapshot(lib_path)
+
+    snaps = list_snapshots(lib_path)
+    # Should keep MIN_KEEP total (old ones pruned, recent kept)
+    assert len(snaps) >= 3  # at least the recent ones
+    assert len(snaps) <= MIN_KEEP + 3
+
+
+def test_prune_by_size(tmp_path):
+    """Snapshots pruned when total exceeds MAX_TOTAL_BYTES (beyond MIN_KEEP)."""
+    import skillm.snapshot as snap_mod
+    original_max = snap_mod.MAX_TOTAL_BYTES
+
+    try:
+        # Set a tiny limit to trigger size pruning
+        snap_mod.MAX_TOTAL_BYTES = 100  # 100 bytes
+
+        lib_path, db = _make_library(tmp_path)
+
+        # Create 15 snapshots with some content
+        for i in range(15):
+            db.write_text(f"data{i}" * 10)
+            create_snapshot(lib_path)
+
+        snaps = list_snapshots(lib_path)
+        # Should keep exactly MIN_KEEP (size limit forces pruning)
+        assert len(snaps) == MIN_KEEP
+    finally:
+        snap_mod.MAX_TOTAL_BYTES = original_max
 
 
 def test_rollback_creates_safety_snapshot(tmp_path):

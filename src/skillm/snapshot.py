@@ -1,17 +1,22 @@
 """Database snapshot management.
 
 Auto-snapshots the library DB before write operations.
-Keeps the last N snapshots and auto-prunes older ones.
+Prunes based on:
+  - Age: keep snapshots from the last 30 days
+  - Disk usage: total snapshots stay under 100MB
+  - Minimum: always keep at least 10 snapshots regardless
 """
 
 from __future__ import annotations
 
 import shutil
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-DEFAULT_MAX_SNAPSHOTS = 10
 SNAPSHOTS_DIR = "snapshots"
+MIN_KEEP = 10
+MAX_AGE_DAYS = 30
+MAX_TOTAL_BYTES = 100 * 1024 * 1024  # 100MB
 
 
 def snapshot_dir(library_path: Path) -> Path:
@@ -19,7 +24,7 @@ def snapshot_dir(library_path: Path) -> Path:
     return library_path / SNAPSHOTS_DIR
 
 
-def create_snapshot(library_path: Path, max_keep: int = DEFAULT_MAX_SNAPSHOTS) -> Path | None:
+def create_snapshot(library_path: Path) -> Path | None:
     """Create a snapshot of library.db before a write operation.
 
     Returns the snapshot path, or None if no DB exists yet.
@@ -36,8 +41,7 @@ def create_snapshot(library_path: Path, max_keep: int = DEFAULT_MAX_SNAPSHOTS) -
 
     shutil.copy2(db_file, snap_file)
 
-    # Prune old snapshots
-    _prune(snap_dir, max_keep)
+    _prune(snap_dir)
 
     return snap_file
 
@@ -51,7 +55,6 @@ def list_snapshots(library_path: Path) -> list[tuple[Path, str]]:
     snaps = sorted(snap_dir.glob("library.db.*"), reverse=True)
     result = []
     for snap in snaps:
-        # Extract timestamp from filename: library.db.20260312T103045Z
         ts_str = snap.name.replace("library.db.", "")
         try:
             ts = datetime.strptime(ts_str, "%Y%m%dT%H%M%S%fZ")
@@ -93,11 +96,54 @@ def rollback(library_path: Path, snapshot_path: Path | None = None) -> Path:
     return snapshot_path
 
 
-def _prune(snap_dir: Path, max_keep: int) -> int:
-    """Remove oldest snapshots beyond max_keep. Returns number removed."""
+def _parse_snap_time(snap: Path) -> datetime | None:
+    """Parse timestamp from snapshot filename."""
+    ts_str = snap.name.replace("library.db.", "")
+    for fmt in ("%Y%m%dT%H%M%S%fZ", "%Y%m%dT%H%M%SZ"):
+        try:
+            return datetime.strptime(ts_str, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+    return None
+
+
+def _prune(snap_dir: Path) -> int:
+    """Prune snapshots by age and disk usage.
+
+    Rules (applied in order):
+    1. Always keep at least MIN_KEEP snapshots
+    2. Remove snapshots older than MAX_AGE_DAYS
+    3. If total size exceeds MAX_TOTAL_BYTES, remove oldest until under limit
+
+    Returns number of snapshots removed.
+    """
     snaps = sorted(snap_dir.glob("library.db.*"), reverse=True)
+
+    if len(snaps) <= MIN_KEEP:
+        return 0
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(days=MAX_AGE_DAYS)
     removed = 0
-    for snap in snaps[max_keep:]:
-        snap.unlink()
-        removed += 1
+
+    # Pass 1: remove old snapshots (keep at least MIN_KEEP)
+    for snap in list(snaps[MIN_KEEP:]):
+        ts = _parse_snap_time(snap)
+        if ts and ts < cutoff:
+            snap.unlink()
+            snaps.remove(snap)
+            removed += 1
+
+    # Pass 2: remove by size (keep at least MIN_KEEP)
+    if len(snaps) > MIN_KEEP:
+        total = sum(s.stat().st_size for s in snaps)
+        for snap in list(reversed(snaps[MIN_KEEP:])):  # oldest first among pruneable
+            if total <= MAX_TOTAL_BYTES:
+                break
+            size = snap.stat().st_size
+            snap.unlink()
+            snaps.remove(snap)
+            total -= size
+            removed += 1
+
     return removed

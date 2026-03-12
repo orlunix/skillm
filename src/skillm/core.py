@@ -21,6 +21,38 @@ from .snapshot import create_snapshot
 SKILLS_JSON = "skills.json"
 SKILLS_DIR = ".skills"
 
+import re
+
+_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)$")
+
+
+def _next_version(existing: list, major: bool = False) -> str:
+    """Compute the next version string from existing versions.
+
+    Parses vMAJOR.MINOR format. If major=True, bumps major and resets minor.
+    Otherwise bumps minor of the latest major.
+
+    Falls back to v0.1 if no existing versions or unparseable.
+    """
+    if not existing:
+        return "v1.0" if major else "v0.1"
+
+    # Parse all version strings
+    max_major = 0
+    max_minor = 0
+    for v in existing:
+        m = _VERSION_RE.match(v.version)
+        if m:
+            maj, minor = int(m.group(1)), int(m.group(2))
+            if maj > max_major or (maj == max_major and minor > max_minor):
+                max_major = maj
+                max_minor = minor
+
+    if major:
+        return f"v{max_major + 1}.0"
+    else:
+        return f"v{max_major}.{max_minor + 1}"
+
 
 def create_library_from_remote(remote: Remote) -> "Library":
     """Create a Library instance from a Remote."""
@@ -79,6 +111,7 @@ class Library:
         name: str | None = None,
         version: str | None = None,
         source: str | None = None,
+        major: bool = False,
     ) -> tuple[str, str]:
         """Publish a skill directory to the library. Returns (name, version)."""
         self._snapshot()
@@ -114,8 +147,7 @@ class Library:
         # Determine version
         if version is None:
             existing = self.db.get_versions(skill_id)
-            next_num = len(existing) + 1
-            version = f"v{next_num}"
+            version = _next_version(existing, major=major)
 
         # Collect file info
         files = list(source_dir.rglob("*"))
