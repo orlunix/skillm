@@ -49,5 +49,5 @@ class SkillMeta:
     tags: list[str] = field(default_factory=list)
     author: str = ""
     source: str = ""
-    requires: list[str] = field(default_factory=list)
+    requires: dict | list = field(default_factory=dict)
     content: str = ""

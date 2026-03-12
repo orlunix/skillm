@@ -32,7 +32,7 @@ def test_extract_with_meta_block(tmp_path):
     meta = extract_metadata(skill_dir)
     assert meta.tags == ["web", "scraping", "python"]
     assert meta.author == "alice"
-    assert meta.requires == ["httpx", "beautifulsoup4"]
+    assert meta.requires == {"bins": ["httpx", "beautifulsoup4"]}
 
 
 def test_extract_name_override(tmp_path):
@@ -78,7 +78,7 @@ def test_yaml_frontmatter_basic(tmp_path):
     assert meta.description == "A tool for things"
     assert meta.author == "bob"
     assert meta.tags == ["cli", "tool", "python"]
-    assert meta.requires == ["python3", "click"]
+    assert meta.requires == {"bins": ["python3", "click"]}
     assert meta.source == "bob/my-tool"
 
 
@@ -167,7 +167,34 @@ def test_clawhub_compat_frontmatter(tmp_path):
     meta = extract_metadata(skill_dir)
     assert meta.name == "cam"
     assert meta.description == "Manage coding agents"
-    assert meta.requires == ["cam"]
+    assert meta.requires == {"bins": ["cam"]}
+
+
+def test_yaml_frontmatter_structured_requires(tmp_path):
+    """Structured requires dict is preserved as-is."""
+    skill_dir = tmp_path / "structured"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: complex-skill\n"
+        "requires:\n"
+        "  bins: [node, npm]\n"
+        '  python: ">=3.10"\n'
+        "  packages: [httpx]\n"
+        "  env: [API_KEY]\n"
+        "  platform: [linux, macos]\n"
+        "---\n\n"
+        "# Complex Skill\n\n"
+        "Needs lots of things.\n"
+    )
+
+    meta = extract_metadata(skill_dir)
+    assert isinstance(meta.requires, dict)
+    assert meta.requires["bins"] == ["node", "npm"]
+    assert meta.requires["python"] == ">=3.10"
+    assert meta.requires["packages"] == ["httpx"]
+    assert meta.requires["env"] == ["API_KEY"]
+    assert meta.requires["platform"] == ["linux", "macos"]
 
 
 def test_frontmatter_beats_comment_block(tmp_path):

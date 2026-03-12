@@ -392,6 +392,19 @@ def add(name: str, pin: bool):
     ver = project.add(name, version=version, pin=pin)
     console.print(f"[green]Added {name}@{ver}[/green]")
 
+    # Run env check and warn
+    from .check import check_requirements
+    from .metadata import extract_metadata
+    skill_dir = project.skills_dir / name
+    if skill_dir.exists():
+        meta = extract_metadata(skill_dir)
+        report = check_requirements(name, meta.requires)
+        if report.has_checks and not report.all_ok:
+            console.print(f"[yellow]Warning: {report.failed} unmet requirement(s):[/yellow]")
+            for r in report.results:
+                if not r.ok:
+                    console.print(f"  [red]✗[/red] {r.name} — {r.message}")
+
 
 @cli.command()
 @click.argument("name")
@@ -426,6 +439,88 @@ def upgrade(name: str | None):
             console.print(f"[green]{skill_name}: {old} → {new}[/green]")
     else:
         console.print("[dim]Everything up to date.[/dim]")
+
+
+# ── Environment Check ──────────────────────────────────────
+
+def _print_check_report(report):
+    """Print a skill check report."""
+    from .check import SkillCheckReport
+    if not report.has_checks:
+        console.print(f"  [dim]No requirements declared[/dim]")
+        return
+
+    for r in report.results:
+        icon = "[green]✓[/green]" if r.ok else "[red]✗[/red]"
+        console.print(f"  {icon} [bold]{r.name}[/bold] — {r.message}")
+
+    if report.all_ok:
+        console.print(f"  [green]All {report.passed} checks passed[/green]")
+    else:
+        console.print(f"  [yellow]{report.passed} passed, {report.failed} failed[/yellow]")
+
+
+@cli.command("check")
+@click.argument("name")
+def check_cmd(name: str):
+    """Check if a skill's requirements are met on this machine."""
+    from .check import check_requirements
+    from .metadata import extract_metadata
+
+    lib = _get_library()
+    skill = lib.info(name)
+    if skill is None:
+        console.print(f"[red]Skill '{name}' not found[/red]")
+        return
+
+    # Get latest version files to read SKILL.md
+    latest = lib.db.get_latest_version(skill.id)
+    if latest is None:
+        console.print(f"[red]No versions for '{name}'[/red]")
+        return
+
+    skill_dir = lib.get_skill_files_path(name, latest.version)
+    meta = extract_metadata(skill_dir)
+
+    console.print(f"[bold]{name}[/bold] environment check:")
+    report = check_requirements(name, meta.requires)
+    _print_check_report(report)
+
+
+@cli.command("doctor")
+def doctor_cmd():
+    """Check requirements for all installed project skills."""
+    from .check import check_requirements
+    from .metadata import extract_metadata
+
+    project = _get_project()
+    manifest = project.list_skills()
+
+    if not manifest:
+        console.print("[dim]No skills in project.[/dim]")
+        return
+
+    all_ok = True
+    for skill_name, info in manifest.items():
+        skill_dir = project.skills_dir / skill_name
+        if not skill_dir.exists():
+            console.print(f"[bold]{skill_name}[/bold]: [red]not installed (run skillm sync)[/red]")
+            all_ok = False
+            continue
+
+        meta = extract_metadata(skill_dir)
+        console.print(f"[bold]{skill_name}[/bold]:")
+        report = check_requirements(skill_name, meta.requires)
+        _print_check_report(report)
+
+        if not report.all_ok:
+            all_ok = False
+        console.print()
+
+    if all_ok:
+        console.print("[green]All skills OK.[/green]")
+    else:
+        console.print("[yellow]Some skills have unmet requirements.[/yellow]")
 
 
 @cli.command("inject")

@@ -100,10 +100,14 @@ def _apply_frontmatter(fm: dict, meta: SkillMeta) -> None:
 
     if "requires" in fm:
         reqs = fm["requires"]
-        if isinstance(reqs, list):
-            meta.requires = [str(r).strip() for r in reqs if r]
+        if isinstance(reqs, dict):
+            # Structured format: {bins: [...], python: ">=3.10", packages: [...], ...}
+            meta.requires = reqs
+        elif isinstance(reqs, list):
+            # Flat list — treat as bins for backward compat
+            meta.requires = {"bins": [str(r).strip() for r in reqs if r]}
         elif isinstance(reqs, str):
-            meta.requires = [r.strip() for r in reqs.split(",") if r.strip()]
+            meta.requires = {"bins": [r.strip() for r in reqs.split(",") if r.strip()]}
 
     # ClawHub compatibility: metadata.openclaw.requires.anyBins → requires
     if not meta.requires and "metadata" in fm:
@@ -115,7 +119,7 @@ def _apply_frontmatter(fm: dict, meta: SkillMeta) -> None:
                 if isinstance(oc_reqs, dict):
                     bins = oc_reqs.get("anyBins", [])
                     if isinstance(bins, list):
-                        meta.requires = [str(b) for b in bins]
+                        meta.requires = {"bins": [str(b) for b in bins]}
 
 
 def _apply_comment_block(block: dict[str, str], meta: SkillMeta) -> None:
@@ -127,7 +131,7 @@ def _apply_comment_block(block: dict[str, str], meta: SkillMeta) -> None:
     if "author" in block:
         meta.author = block["author"].strip()
     if "requires" in block:
-        meta.requires = [r.strip() for r in block["requires"].split(",") if r.strip()]
+        meta.requires = {"bins": [r.strip() for r in block["requires"].split(",") if r.strip()]}
     if "source" in block:
         meta.source = block["source"].strip()
 
