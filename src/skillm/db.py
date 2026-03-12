@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS skills (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     name        TEXT NOT NULL UNIQUE,
     description TEXT DEFAULT '',
+    category    TEXT DEFAULT '',
     author      TEXT DEFAULT '',
     source      TEXT DEFAULT '',
     created_at  TEXT NOT NULL,
@@ -58,6 +59,7 @@ FTS_SCHEMA = """
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     name,
     description,
+    category,
     tags,
     content
 );
@@ -65,13 +67,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
 
 FTS_TRIGGERS = """
 CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills BEGIN
-    INSERT INTO search_index(rowid, name, description, tags, content)
-    VALUES (new.id, new.name, new.description, '', '');
+    INSERT INTO search_index(rowid, name, description, category, tags, content)
+    VALUES (new.id, new.name, new.description, new.category, '', '');
 END;
 
 CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills BEGIN
     UPDATE search_index
-    SET name = new.name, description = new.description
+    SET name = new.name, description = new.description, category = new.category
     WHERE rowid = new.id;
 END;
 
@@ -116,9 +118,9 @@ class Database:
 
     def insert_skill(self, skill: Skill) -> int:
         cur = self.conn.execute(
-            "INSERT INTO skills(name, description, author, source, created_at, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            (skill.name, skill.description, skill.author, skill.source,
+            "INSERT INTO skills(name, description, category, author, source, created_at, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?)",
+            (skill.name, skill.description, skill.category, skill.author, skill.source,
              skill.created_at, skill.updated_at),
         )
         skill_id = cur.lastrowid
@@ -133,7 +135,7 @@ class Database:
             return None
         skill = Skill(
             id=row["id"], name=row["name"], description=row["description"],
-            author=row["author"], source=row["source"],
+            category=row["category"], author=row["author"], source=row["source"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
         skill.tags = self.get_tags(skill.id)
@@ -142,8 +144,8 @@ class Database:
 
     def update_skill(self, skill: Skill) -> None:
         self.conn.execute(
-            "UPDATE skills SET description=?, author=?, source=?, updated_at=? WHERE id=?",
-            (skill.description, skill.author, skill.source, skill.updated_at, skill.id),
+            "UPDATE skills SET description=?, category=?, author=?, source=?, updated_at=? WHERE id=?",
+            (skill.description, skill.category, skill.author, skill.source, skill.updated_at, skill.id),
         )
         self.conn.commit()
 
@@ -160,7 +162,7 @@ class Database:
         for row in rows:
             skill = Skill(
                 id=row["id"], name=row["name"], description=row["description"],
-                author=row["author"], source=row["source"],
+                category=row["category"], author=row["author"], source=row["source"],
                 created_at=row["created_at"], updated_at=row["updated_at"],
             )
             skill.tags = self.get_tags(skill.id)
@@ -316,7 +318,7 @@ class Database:
             return None
         skill = Skill(
             id=row["id"], name=row["name"], description=row["description"],
-            author=row["author"], source=row["source"],
+            category=row["category"], author=row["author"], source=row["source"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
         skill.tags = self.get_tags(skill.id)
@@ -337,6 +339,36 @@ class Database:
             (key, value),
         )
         self.conn.commit()
+
+    def list_categories(self) -> list[tuple[str, int]]:
+        """List all categories with skill counts. Returns [(category, count)]."""
+        rows = self.conn.execute(
+            "SELECT COALESCE(NULLIF(category, ''), 'general') as cat, COUNT(*) as cnt "
+            "FROM skills GROUP BY cat ORDER BY cat"
+        ).fetchall()
+        return [(r["cat"], r["cnt"]) for r in rows]
+
+    def list_skills_by_category(self, category: str) -> list[Skill]:
+        """List skills filtered by category."""
+        if category == "general":
+            rows = self.conn.execute(
+                "SELECT * FROM skills WHERE category = '' OR category = 'general' ORDER BY name"
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM skills WHERE category = ? ORDER BY name", (category,)
+            ).fetchall()
+        skills = []
+        for row in rows:
+            skill = Skill(
+                id=row["id"], name=row["name"], description=row["description"],
+                category=row["category"], author=row["author"], source=row["source"],
+                created_at=row["created_at"], updated_at=row["updated_at"],
+            )
+            skill.tags = self.get_tags(skill.id)
+            skill.versions = self.get_versions(skill.id)
+            skills.append(skill)
+        return skills
 
     def vacuum(self) -> None:
         self.conn.execute("VACUUM")

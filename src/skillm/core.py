@@ -46,11 +46,13 @@ class Library:
         source_dir: Path,
         name: str | None = None,
         version: str | None = None,
+        source: str | None = None,
     ) -> tuple[str, str]:
         """Publish a skill directory to the library. Returns (name, version)."""
         source_dir = source_dir.resolve()
         meta = extract_metadata(source_dir, name_override=name)
         skill_name = meta.name
+        skill_source = source or meta.source or ""
 
         now = datetime.now(timezone.utc).isoformat()
 
@@ -60,14 +62,18 @@ class Library:
             skill_id = self.db.insert_skill(Skill(
                 name=skill_name,
                 description=meta.description,
+                category=meta.category,
                 author=meta.author,
+                source=skill_source,
                 created_at=now,
                 updated_at=now,
             ))
             skill = self.db.get_skill(skill_name)
         else:
             skill.description = meta.description
+            skill.category = meta.category or skill.category
             skill.author = meta.author
+            skill.source = skill_source or skill.source
             skill.updated_at = now
             self.db.update_skill(skill)
             skill_id = skill.id
@@ -188,7 +194,8 @@ class Library:
                     if skill is None:
                         skill_id = self.db.insert_skill(Skill(
                             name=name, description=meta.description,
-                            author=meta.author, created_at=now, updated_at=now,
+                            category=meta.category, author=meta.author,
+                            created_at=now, updated_at=now,
                         ))
                     else:
                         skill_id = skill.id

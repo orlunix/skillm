@@ -138,10 +138,16 @@ def library_check():
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
 @click.option("--version", default=None, help="Explicit version (default: auto-increment)")
-def publish(source: str, name: str | None, version: str | None):
+@click.option("-c", "--category", default=None, help="Set skill category")
+def publish(source: str, name: str | None, version: str | None, category: str | None):
     """Publish a skill directory to the library."""
     lib = _get_library()
     skill_name, ver = lib.publish(Path(source), name=name, version=version)
+    if category:
+        skill = lib.info(skill_name)
+        if skill:
+            skill.category = category.strip().lower()
+            lib.db.update_skill(skill)
     console.print(f"[green]Published {skill_name}@{ver}[/green]")
 
 
@@ -170,6 +176,8 @@ def info(name: str):
 
     console.print(f"[bold]Name:[/bold] {skill.name}")
     console.print(f"[bold]Description:[/bold] {skill.description}")
+    if skill.category:
+        console.print(f"[bold]Category:[/bold] {skill.category}")
     if skill.tags:
         console.print(f"[bold]Tags:[/bold] {', '.join(skill.tags)}")
     if skill.author:
@@ -186,33 +194,63 @@ def info(name: str):
 
 
 @cli.command("list")
-def list_cmd():
+@click.option("-c", "--category", default=None, help="Filter by category")
+def list_cmd(category: str | None):
     """List all skills in the library."""
     lib = _get_library()
-    skills = lib.list_skills()
+
+    if category:
+        skills = lib.db.list_skills_by_category(category)
+    else:
+        skills = lib.list_skills()
 
     if not skills:
-        console.print("[dim]No skills in library.[/dim]")
+        msg = f"No skills in category '{category}'." if category else "No skills in library."
+        console.print(f"[dim]{msg}[/dim]")
         return
 
-    table = Table(show_header=True)
-    table.add_column("Name", style="bold")
-    table.add_column("Latest")
-    table.add_column("Tags")
-    table.add_column("Size", justify="right")
-    table.add_column("Updated")
+    if not category:
+        # Group by category
+        grouped: dict[str, list] = {}
+        for skill in skills:
+            cat = skill.category or "general"
+            grouped.setdefault(cat, []).append(skill)
 
-    for skill in skills:
-        latest = skill.versions[-1] if skill.versions else None
-        table.add_row(
-            skill.name,
-            latest.version if latest else "-",
-            ", ".join(skill.tags) if skill.tags else "",
-            _format_size(latest.total_size) if latest else "-",
-            skill.updated_at[:10] if skill.updated_at else "-",
-        )
+        for cat in sorted(grouped):
+            table = Table(show_header=True, title=cat, title_style="bold cyan")
+            table.add_column("Name", style="bold")
+            table.add_column("Latest")
+            table.add_column("Tags")
+            table.add_column("Size", justify="right")
 
-    console.print(table)
+            for skill in grouped[cat]:
+                latest = skill.versions[-1] if skill.versions else None
+                table.add_row(
+                    skill.name,
+                    latest.version if latest else "-",
+                    ", ".join(skill.tags) if skill.tags else "",
+                    _format_size(latest.total_size) if latest else "-",
+                )
+
+            console.print(table)
+            console.print()
+    else:
+        table = Table(show_header=True, title=category, title_style="bold cyan")
+        table.add_column("Name", style="bold")
+        table.add_column("Latest")
+        table.add_column("Tags")
+        table.add_column("Size", justify="right")
+
+        for skill in skills:
+            latest = skill.versions[-1] if skill.versions else None
+            table.add_row(
+                skill.name,
+                latest.version if latest else "-",
+                ", ".join(skill.tags) if skill.tags else "",
+                _format_size(latest.total_size) if latest else "-",
+            )
+
+        console.print(table)
 
 
 @cli.command()
@@ -265,6 +303,44 @@ def search(query: str):
         console.print(f"[bold]{skill.name}[/bold]{ver}{tags}")
         if skill.description:
             console.print(f"  {skill.description}")
+
+
+@cli.command("categories")
+def categories_cmd():
+    """Show all categories with skill counts."""
+    lib = _get_library()
+    cats = lib.db.list_categories()
+
+    if not cats:
+        console.print("[dim]No skills in library.[/dim]")
+        return
+
+    table = Table(show_header=True)
+    table.add_column("Category", style="bold")
+    table.add_column("Skills", justify="right")
+
+    for cat, count in cats:
+        table.add_row(cat, str(count))
+
+    console.print(table)
+
+
+@cli.command("categorize")
+@click.argument("name")
+@click.argument("category")
+def categorize_cmd(name: str, category: str):
+    """Set the category of a skill."""
+    lib = _get_library()
+    skill = lib.info(name)
+    if skill is None:
+        console.print(f"[red]Skill '{name}' not found[/red]")
+        return
+
+    skill.category = category.strip().lower()
+    from datetime import datetime, timezone
+    skill.updated_at = datetime.now(timezone.utc).isoformat()
+    lib.db.update_skill(skill)
+    console.print(f"[green]{name} → {skill.category}[/green]")
 
 
 @cli.command()
@@ -422,29 +498,76 @@ def export_cmd(name: str, version: str | None, output: str | None):
 @cli.command("import")
 @click.argument("source")
 @click.option("--name", default=None, help="Override skill name")
-def import_cmd(source: str, name: str | None):
-    """Import a skill from a .skillpack file or local directory."""
+@click.option("--ref", default=None, help="Git ref for GitHub imports (tag, branch)")
+@click.option("--token", default=None, help="Auth token (GitHub or ClawHub)")
+def import_cmd(source: str, name: str | None, ref: str | None, token: str | None):
+    """Import a skill from various sources.
+
+    \b
+    Sources:
+      ./path/to/dir          Local directory
+      ./skill.skillpack      Skillpack archive
+      owner/repo             GitHub repository
+      owner/repo/subpath     GitHub subdirectory
+      clawhub:slug           ClawHub registry
+      clawhub:slug@1.0.0     ClawHub specific version
+      https://url/skill.zip  URL (tar.gz or zip)
+    """
+    from .importers import (
+        detect_source_type,
+        import_from_clawhub,
+        import_from_github,
+        import_from_url,
+    )
+
     lib = _get_library()
-    source_path = Path(source)
 
-    if source_path.suffix == ".skillpack":
-        # Import from archive
-        files_dir, metadata = import_skillpack(source_path)
-        skill_name = name or metadata["name"]
-        version = metadata.get("version", "v1")
+    try:
+        source_type = detect_source_type(source)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return
 
-        lib.publish(files_dir, name=skill_name, version=version)
-        # Clean up temp dir
-        shutil.rmtree(files_dir.parent)
-        console.print(f"[green]Imported {skill_name}@{version} from {source_path.name}[/green]")
+    try:
+        if source_type == "skillpack":
+            files_dir, metadata = import_skillpack(Path(source))
+            skill_name = name or metadata["name"]
+            version = metadata.get("version", "v1")
+            lib.publish(files_dir, name=skill_name, version=version, source=source)
+            shutil.rmtree(files_dir.parent)
+            console.print(f"[green]Imported {skill_name}@{version} from {Path(source).name}[/green]")
 
-    elif source_path.is_dir():
-        # Import from local directory
-        skill_name, ver = lib.publish(source_path, name=name)
-        console.print(f"[green]Imported {skill_name}@{ver}[/green]")
+        elif source_type == "directory":
+            skill_name, ver = lib.publish(Path(source), name=name)
+            console.print(f"[green]Imported {skill_name}@{ver}[/green]")
 
-    else:
-        console.print(f"[red]Source not found or unsupported: {source}[/red]")
+        elif source_type == "github":
+            console.print(f"[dim]Fetching from GitHub: {source}...[/dim]")
+            skill_dir, source_str = import_from_github(source, ref=ref, token=token)
+            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-gh-") else skill_dir)
+            console.print(f"[green]Imported {skill_name}@{ver} from GitHub ({source_str})[/green]")
+
+        elif source_type == "clawhub":
+            console.print(f"[dim]Fetching from ClawHub: {source}...[/dim]")
+            skill_dir, source_str = import_from_clawhub(source, token=token)
+            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-ch-") else skill_dir)
+            console.print(f"[green]Imported {skill_name}@{ver} from ClawHub ({source_str})[/green]")
+
+        elif source_type == "url":
+            console.print(f"[dim]Downloading: {source}...[/dim]")
+            skill_dir, source_str = import_from_url(source)
+            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-url-") else skill_dir)
+            console.print(f"[green]Imported {skill_name}@{ver} from URL[/green]")
+
+    except FileNotFoundError as e:
+        console.print(f"[red]{e}[/red]")
+    except httpx.HTTPStatusError as e:
+        console.print(f"[red]HTTP error: {e.response.status_code} — {e.request.url}[/red]")
+    except Exception as e:
+        console.print(f"[red]Import failed: {e}[/red]")
 
 
 if __name__ == "__main__":
