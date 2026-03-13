@@ -43,6 +43,6 @@ def tmp_project(tmp_path, tmp_library):
     """Create a temporary project with an initialized library."""
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    project = Project(project_dir=project_dir, library=tmp_library)
+    project = Project(project_dir=project_dir, library=tmp_library, agent="claude")
     project.init()
     return project

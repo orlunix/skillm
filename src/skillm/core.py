@@ -362,30 +362,52 @@ class Library:
         return self.backend.get_skill_files(name, version)
 
 
-class Project:
-    """Project-level skill operations."""
+# Agent config directory mappings
+AGENT_DIRS = {
+    "claude": ".claude",
+    "cursor": ".cursor",
+    "codex": ".codex",
+    "openclaw": ".openclaw",
+}
+DEFAULT_AGENT = "claude"
 
-    def __init__(self, project_dir: Path | None = None, library: Library | None = None):
+
+class Project:
+    """Project-level skill operations.
+
+    Skills are installed into agent-specific directories:
+      .claude/skills/my-skill/
+      .cursor/skills/my-skill/
+      .codex/skills/my-skill/
+
+    The manifest (skills.json) lives in the agent directory.
+    """
+
+    def __init__(
+        self,
+        project_dir: Path | None = None,
+        library: Library | None = None,
+        agent: str = DEFAULT_AGENT,
+    ):
         self.project_dir = (project_dir or Path.cwd()).resolve()
         self.library = library or Library()
-        self.skills_json = self.project_dir / SKILLS_JSON
-        self.skills_dir = self.project_dir / SKILLS_DIR
+        self.agent = agent
 
-    def init(self) -> None:
-        """Initialize project for skill consumption."""
+        agent_dir_name = AGENT_DIRS.get(agent, f".{agent}")
+        self.agent_dir = self.project_dir / agent_dir_name
+        self.skills_dir = self.agent_dir / "skills"
+        self.skills_json = self.agent_dir / SKILLS_JSON
+
+    def _ensure_dirs(self) -> None:
+        """Create agent and skills directories if they don't exist."""
+        self.agent_dir.mkdir(exist_ok=True)
         self.skills_dir.mkdir(exist_ok=True)
         if not self.skills_json.exists():
             self.skills_json.write_text(json.dumps({"skills": {}}, indent=2) + "\n")
 
-        # Add .skills to .gitignore if git repo
-        gitignore = self.project_dir / ".gitignore"
-        if gitignore.exists():
-            content = gitignore.read_text()
-            if SKILLS_DIR not in content:
-                with open(gitignore, "a") as f:
-                    f.write(f"\n{SKILLS_DIR}/\n")
-        elif (self.project_dir / ".git").exists():
-            gitignore.write_text(f"{SKILLS_DIR}/\n")
+    def init(self) -> None:
+        """Initialize project for skill consumption."""
+        self._ensure_dirs()
 
     def _load_manifest(self) -> dict:
         if self.skills_json.exists():
@@ -397,6 +419,7 @@ class Project:
 
     def add(self, name: str, version: str | None = None, pin: bool = False) -> str:
         """Add a skill from library to project. Returns installed version."""
+        self._ensure_dirs()
         skill = self.library.info(name)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found in library")

@@ -27,12 +27,17 @@ def _get_library() -> Library:
         sys.exit(1)
 
 
-def _get_project(library: Library | None = None) -> Project:
-    project = Project(library=library or _get_library())
-    if not project.skills_json.exists():
-        console.print("[red]Project not initialized. Run 'skillm init' first.[/red]")
-        sys.exit(1)
-    return project
+def _get_project(
+    library: Library | None = None,
+    agent: str = "claude",
+    project_root: str | None = None,
+) -> Project:
+    project_dir = Path(project_root).resolve() if project_root else None
+    return Project(
+        project_dir=project_dir,
+        library=library or _get_library(),
+        agent=agent,
+    )
 
 
 def _format_size(size_bytes: int) -> str:
@@ -502,28 +507,28 @@ def untag(name: str, tags: tuple[str]):
 
 # ── Project Operations ─────────────────────────────────────
 
-@cli.command("init")
-def project_init():
-    """Initialize current project for skill consumption."""
-    lib = _get_library()
-    project = Project(library=lib)
-    project.init()
-    console.print("[green]Project initialized — created skills.json and .skills/[/green]")
+# Common options for project commands
+_agent_option = click.option("--agent", "-a", default="claude",
+    type=click.Choice(["claude", "cursor", "codex", "openclaw"]),
+    help="Target agent (default: claude)")
+_root_option = click.option("--project-root", "-r", default=None,
+    type=click.Path(exists=True), help="Project root directory (default: cwd)")
 
 
 @cli.command("install")
 @click.argument("name")
 @click.option("--pin", is_flag=True, help="Pin to this version")
-def install_cmd(name: str, pin: bool):
+@_agent_option
+@_root_option
+def install_cmd(name: str, pin: bool, agent: str, project_root: str | None):
     """Install a skill from the library into this project."""
-    # Parse name@version
     version = None
     if "@" in name:
         name, version = name.rsplit("@", 1)
 
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     ver = project.add(name, version=version, pin=pin)
-    console.print(f"[green]Installed {name}@{ver}[/green]")
+    console.print(f"[green]Installed {name}@{ver} → {project.skills_dir.relative_to(project.project_dir)}/[/green]")
 
     # Run env check and warn
     from .check import check_requirements
@@ -541,9 +546,11 @@ def install_cmd(name: str, pin: bool):
 
 @cli.command("uninstall")
 @click.argument("name")
-def uninstall_cmd(name: str):
+@_agent_option
+@_root_option
+def uninstall_cmd(name: str, agent: str, project_root: str | None):
     """Uninstall a skill from this project."""
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     if project.drop(name):
         console.print(f"[green]Uninstalled {name}[/green]")
     else:
@@ -551,9 +558,11 @@ def uninstall_cmd(name: str):
 
 
 @cli.command()
-def sync():
+@_agent_option
+@_root_option
+def sync(agent: str, project_root: str | None):
     """Install missing skills from skills.json."""
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     synced = project.sync()
     if synced:
         console.print(f"[green]Synced: {', '.join(synced)}[/green]")
@@ -563,9 +572,11 @@ def sync():
 
 @cli.command()
 @click.argument("name", required=False)
-def upgrade(name: str | None):
+@_agent_option
+@_root_option
+def upgrade(name: str | None, agent: str, project_root: str | None):
     """Update project skills to latest library versions."""
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     upgraded = project.upgrade(name=name)
     if upgraded:
         for skill_name, old, new in upgraded:
@@ -658,13 +669,15 @@ def check_cmd(name: str, scan: bool):
 
 @cli.command("doctor")
 @click.option("--scan/--no-scan", default=True, help="Auto-scan content for undeclared requirements")
-def doctor_cmd(scan: bool):
+@_agent_option
+@_root_option
+def doctor_cmd(scan: bool, agent: str, project_root: str | None):
     """Check requirements for all installed project skills."""
     from .check import check_requirements
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     manifest = project.list_skills()
 
     if not manifest:
@@ -738,9 +751,11 @@ def inject_cmd(fmt: str, config_file: str | None):
 
 @cli.command("enable")
 @click.argument("name")
-def enable_cmd(name: str):
+@_agent_option
+@_root_option
+def enable_cmd(name: str, agent: str, project_root: str | None):
     """Enable a skill in the project."""
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     if project.enable(name):
         console.print(f"[green]Enabled {name}[/green]")
     else:
@@ -749,9 +764,11 @@ def enable_cmd(name: str):
 
 @cli.command("disable")
 @click.argument("name")
-def disable_cmd(name: str):
+@_agent_option
+@_root_option
+def disable_cmd(name: str, agent: str, project_root: str | None):
     """Disable a skill in the project (keep files, hide from agent)."""
-    project = _get_project()
+    project = _get_project(agent=agent, project_root=project_root)
     if project.disable(name):
         console.print(f"[green]Disabled {name}[/green]")
     else:
