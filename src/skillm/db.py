@@ -101,6 +101,7 @@ class Database:
 
     def initialize(self) -> None:
         """Create tables, indexes, FTS, and triggers."""
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn.executescript(SCHEMA)
         self.conn.executescript(FTS_SCHEMA)
         self.conn.executescript(FTS_TRIGGERS)

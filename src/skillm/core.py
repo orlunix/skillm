@@ -84,6 +84,7 @@ class Library:
         self.config = config or load_config()
         self.backend = self._create_backend()
         self.db = Database(self.backend.get_db())
+        self.db.initialize()
 
     def _create_backend(self) -> LibraryBackend:
         if self.config.library.backend == "local":
