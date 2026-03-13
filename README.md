@@ -110,20 +110,63 @@ Only the latest version of each skill is pushed. Version numbers are determined 
 
 ## How It Works
 
-```
-Library (~/.skillm/)              Project (your-repo/)
-├── library.db                    ├── .claude/
-├── remotes.toml                  │   ├── skills.json
-├── snapshots/                    │   └── skills/
-└── skills/                       │       ├── web-scraper/SKILL.md
-    ├── web-scraper/v0.1/         │       └── formatter/SKILL.md
-    ├── web-scraper/v0.2/         ├── .cursor/skills/  ← other agents
-    └── formatter/v1.0/           └── CLAUDE.md  ← auto-injected
+```mermaid
+flowchart LR
+    subgraph Sources["📥 Sources"]
+        direction TB
+        S1["SKILL.md\ndirectory"]
+        S2["GitHub\nrepo"]
+        S3["ClawHub\nregistry"]
+        S4[".skillpack\narchive"]
+    end
+
+    subgraph Local["🏠 Local Library  ~/.skillm/"]
+        direction TB
+        DB[("library.db\n(SQLite + FTS5)")]
+        SK["skills/\n├── web-scraper/v0.1/\n├── web-scraper/v0.2/\n└── formatter/v1.0/"]
+        SNAP["snapshots/"]
+    end
+
+    subgraph Remote["🌐 Remote Library"]
+        direction TB
+        RDB[("library.db")]
+        RSK["skills/"]
+    end
+
+    subgraph Project["📁 Your Project"]
+        direction TB
+        Claude[".claude/\n├── skills.json\n└── skills/my-skill/"]
+        Cursor[".cursor/\n└── skills/"]
+        Config["CLAUDE.md\n(auto-injected)"]
+    end
+
+    S1 -->|"skillm add\nskillm import"| Local
+    S2 -->|"skillm import"| Local
+    S3 -->|"skillm import"| Local
+    S4 -->|"skillm import"| Local
+
+    Remote <-->|"skillm pull\nskillm push"| Local
+
+    Local -->|"skillm install"| Project
+    Local -->|"skillm inject"| Config
 ```
 
-- **Library** stores all your skills with full version history
-- **Project** installs specific skill versions from the library
-- **Inject** writes skill references into agent config files
+```
+Local Library (~/.skillm/)            Project (your-repo/)
+├── library.db                        ├── .claude/
+├── remotes.toml                      │   ├── skills.json
+├── snapshots/                        │   └── skills/
+└── skills/                           │       ├── web-scraper/SKILL.md
+    ├── web-scraper/v0.1/             │       └── formatter/SKILL.md
+    ├── web-scraper/v0.2/             ├── .cursor/skills/  ← other agents
+    └── formatter/v1.0/               └── CLAUDE.md  ← auto-injected
+```
+
+**The flow:**
+1. **Add** skills from directories, GitHub, ClawHub, or archives into your local library
+2. **Pull** skills from a shared remote library, or **push** your skills to it
+3. **Install** skills from your local library into any project
+4. **Inject** skill references into your agent's config file — your AI agent follows them
 
 ## What is a Skill?
 
