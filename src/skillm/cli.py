@@ -23,8 +23,11 @@ def _get_library() -> Library:
     try:
         return get_active_library()
     except Exception:
-        console.print("[red]Library not initialized. Run 'skillm library init' first.[/red]")
-        sys.exit(1)
+        # Auto-init local library on first use
+        config = Config()
+        lib = Library(config)
+        lib.init()
+        return lib
 
 
 def _get_project(
@@ -247,25 +250,49 @@ def remote_list():
 
 # ── Push / Pull ───────────────────────────────────────────
 
+def _resolve_remote(remote_name: str | None) -> tuple[str, "Remote"] | None:
+    """Resolve remote name, defaulting to the first non-active remote.
+
+    Returns (name, Remote) or None if no suitable remote found.
+    """
+    from .remote import load_remotes
+    config = load_remotes()
+
+    if remote_name:
+        if remote_name not in config.remotes:
+            console.print(f"[red]Remote '{remote_name}' not found[/red]")
+            return None
+        if remote_name == config.active:
+            console.print(f"[red]Cannot use the active library ('{remote_name}'). Specify a different remote.[/red]")
+            return None
+        return remote_name, config.remotes[remote_name]
+
+    # Default: pick the first non-active remote
+    for name, r in config.remotes.items():
+        if name != config.active:
+            return name, r
+
+    console.print("[red]No remote configured. Run: skillm remote add <name> <path>[/red]")
+    return None
+
+
 @cli.command("push")
-@click.argument("remote_name")
-def push_cmd(remote_name: str):
+@click.argument("remote_name", required=False, default=None)
+def push_cmd(remote_name: str | None):
     """Push all skills to a remote library.
 
     Takes the latest version of each local skill and adds it to the
     remote. Version numbers are determined by the remote's history.
+
+    If REMOTE_NAME is omitted, pushes to the default remote.
     """
-    from .remote import load_remotes
-    config = load_remotes()
-    if remote_name not in config.remotes:
-        console.print(f"[red]Remote '{remote_name}' not found[/red]")
+    resolved = _resolve_remote(remote_name)
+    if resolved is None:
         return
-    if remote_name == config.active:
-        console.print(f"[red]Cannot push to the active library ('{remote_name}'). Push to a different remote.[/red]")
-        return
+    remote_name, remote = resolved
 
     local = _get_library()
-    target = create_library_from_remote(config.remotes[remote_name])
+    target = create_library_from_remote(remote)
 
     results = local.push(target)
     if not results:
@@ -275,7 +302,6 @@ def push_cmd(remote_name: str):
     new_count = 0
     updated_count = 0
     for name, local_ver, target_ver in results:
-        # Check if skill existed on remote before
         console.print(f"  [green]{name}[/green] {local_ver} → {target_ver}")
         if target_ver == "v0.1":
             new_count += 1
@@ -291,24 +317,22 @@ def push_cmd(remote_name: str):
 
 
 @cli.command("pull")
-@click.argument("remote_name")
-def pull_cmd(remote_name: str):
+@click.argument("remote_name", required=False, default=None)
+def pull_cmd(remote_name: str | None):
     """Pull all skills from a remote library.
 
     Takes the latest version of each remote skill and adds it to the
     local library. Version numbers are determined by local history.
+
+    If REMOTE_NAME is omitted, pulls from the default remote.
     """
-    from .remote import load_remotes
-    config = load_remotes()
-    if remote_name not in config.remotes:
-        console.print(f"[red]Remote '{remote_name}' not found[/red]")
+    resolved = _resolve_remote(remote_name)
+    if resolved is None:
         return
-    if remote_name == config.active:
-        console.print(f"[red]Cannot pull from the active library ('{remote_name}'). Pull from a different remote.[/red]")
-        return
+    remote_name, remote = resolved
 
     local = _get_library()
-    source = create_library_from_remote(config.remotes[remote_name])
+    source = create_library_from_remote(remote)
 
     results = local.pull(source)
     if not results:

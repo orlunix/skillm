@@ -23,36 +23,33 @@ Requires Python 3.10+.
 
 ## Quick Start
 
-### 1. Pull skills and install into your project
+### 1. Pull skills and install
 
 ```bash
-# Initialize your local library
-skillm library init
-
-# Add the team's shared remote
+# One-time setup: point to the team library
 skillm remote add team /home/prgn_share/skillm
 
-# Pull all skills from the remote into your local library
-skillm pull team
+# Pull skills to your local library
+skillm pull
 # Pulled 5 skills from team (5 new)
 
-# Browse what's available
-skillm list
-skillm search "pytest"
-
-# Install a skill into your project
+# Install into your project
 cd your-project/
 skillm install my-skill
 # Installed my-skill@v0.1 → .claude/skills/
-
-# Install for a different agent
-skillm install my-skill --agent cursor       # → .cursor/skills/
-
-# Keep project skills up to date
-skillm upgrade
 ```
 
-### 2. Manage skills in your local library
+That's it. The local library is auto-created on first use. `pull` defaults to the configured remote. `install` auto-creates the agent directory.
+
+```bash
+# Other useful commands
+skillm list                                  # browse available skills
+skillm search "pytest"                       # search by keyword
+skillm install my-skill --agent cursor       # install for a different agent
+skillm upgrade                               # update all project skills
+```
+
+### 2. Manage your local library
 
 Create a skill — just a directory with a `SKILL.md`:
 
@@ -63,9 +60,6 @@ cat > my-skill/SKILL.md << 'EOF'
 name: my-skill
 description: Help with writing unit tests
 tags: [testing, python]
-requires:
-  bins: [python3]
-  packages: [pytest]
 ---
 
 # Unit Test Helper
@@ -90,7 +84,6 @@ Or import from external sources:
 ```bash
 skillm import owner/repo                     # GitHub
 skillm import clawhub:skill-slug             # ClawHub registry
-skillm import https://example.com/skill.tar.gz  # URL
 skillm import ./skill.skillpack              # portable archive
 ```
 
@@ -104,15 +97,14 @@ skillm tag my-skill python web               # add tags
 skillm update ./my-skill/                    # replace latest version in-place
 ```
 
-### 3. Push to the remote server
+### 3. Push to the remote
 
 ```bash
-# Push all your local skills to the team library
-skillm push team
+skillm push
 # Pushed 3 skills to team (2 new, 1 updated)
 ```
 
-Version numbers are determined by the remote's own history. Only the latest version of each skill is pushed — like merging a branch, not replicating history.
+Only the latest version of each skill is pushed. Version numbers are determined by the remote's own history.
 
 ---
 
