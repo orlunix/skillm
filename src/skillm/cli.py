@@ -376,6 +376,26 @@ def add_cmd(source: str, name: str | None, major: bool, version: str | None, cat
     console.print(f"[green]Added {skill_name}@{ver}[/green]")
 
 
+@cli.command("update")
+@click.argument("source", type=click.Path(exists=True))
+@click.option("--name", default=None, help="Override skill name")
+def update_cmd(source: str, name: str | None):
+    """Replace the latest version of an existing skill in-place.
+
+    Unlike 'add' which creates a new version, 'update' overwrites the
+    latest version. Useful for fixing typos or small corrections.
+
+    Errors if the skill doesn't exist — use 'add' for new skills.
+    """
+    lib = _get_library()
+    source_path = Path(source)
+    try:
+        skill_name, ver = lib.override(source_path, name=name)
+        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
 @cli.command("rm")
 @click.argument("name")
 @click.option("--version", default=None, help="Remove specific version only")

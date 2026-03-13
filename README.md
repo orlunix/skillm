@@ -9,7 +9,7 @@ Manage a library of reusable skills (instructions, tools, prompts) that any codi
 - **No internet required** — skills are stored locally, not fetched on-demand
 - **You own your library** — not dependent on any platform being up
 - **Version everything** — every `add` creates a new version (v0.1, v0.2, ...), safe rollback anytime
-- **Multi-remote** — switch between local, SSH, or NAS libraries with one command
+- **Push/pull sharing** — sync skills with team libraries via `push` and `pull`, just like git
 - **Agent-agnostic** — works with Claude Code, Cursor, Codex, OpenClaw, or any markdown-based agent
 - **Team-safe** — SSH remotes use file locking, DB snapshots protect against mistakes
 
@@ -30,6 +30,13 @@ skillm library init
 ```
 
 This creates `~/.skillm/` with a SQLite database and skill storage.
+
+Or use an existing shared library:
+
+```bash
+skillm remote add team /home/prgn_share/skillm
+skillm remote switch team
+```
 
 ### 2. Create a skill
 
@@ -311,7 +318,7 @@ skillm push team               # sync local → remote
 skillm pull team               # sync remote → local
 ```
 
-All `add`/`rm`/`update` operations work on your local library. Use `push` and `pull` to sync with remotes — just like git.
+All `add`/`rm`/`update` operations work on your local library. Use `push` and `pull` to sync with remotes.
 
 **SSH safety**: writes acquire a remote file lock (`flock`) so multiple team members can safely push to the same library without corrupting the database.
 
@@ -431,6 +438,7 @@ CLI (Click)
 |---------|-------------|
 | `skillm add <dir>` | Add a skill (creates new version) |
 | `skillm add <dir> --major` | Add with major version bump |
+| `skillm update <dir>` | Replace latest version in-place |
 | `skillm rm <name>` | Remove a skill |
 | `skillm rm <name> --version v0.1` | Remove a specific version |
 | `skillm info <name>` | Show skill details |
