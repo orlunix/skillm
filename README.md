@@ -23,24 +23,47 @@ Requires Python 3.10+.
 
 ## Quick Start
 
-### 1. Initialize your library
+### 1. Connect to a library
 
-```bash
-skillm library init
-```
-
-This creates `~/.skillm/` with a SQLite database and skill storage.
-
-Or use an existing shared library:
+Use an existing shared library:
 
 ```bash
 skillm remote add team /home/prgn_share/skillm
 skillm remote switch team
 ```
 
-### 2. Create a skill
+Or create your own:
 
-A skill is just a directory with a `SKILL.md` file:
+```bash
+skillm library init                          # creates ~/.skillm/
+```
+
+### 2. Browse and install skills
+
+```bash
+# See what's available
+skillm list
+
+# Search for something specific
+skillm search "pytest"
+
+# Install a skill into your project
+cd your-project/
+skillm install my-skill
+# Installed my-skill@v0.1 → .claude/skills/
+
+# Install for a different agent
+skillm install my-skill --agent cursor       # → .cursor/skills/
+
+# Keep skills up to date
+skillm upgrade
+```
+
+That's it — your AI agent now has access to the skill. `install` auto-creates the agent directory and copies skill files.
+
+### 3. Create your own skills
+
+A skill is a directory with a `SKILL.md` file:
 
 ```bash
 mkdir my-skill
@@ -48,7 +71,6 @@ cat > my-skill/SKILL.md << 'EOF'
 ---
 name: my-skill
 description: Help with writing unit tests
-author: alice
 tags: [testing, python]
 requires:
   bins: [python3]
@@ -57,127 +79,45 @@ requires:
 
 # Unit Test Helper
 
-When asked to write tests, follow these guidelines:
-
+When asked to write tests:
 1. Use pytest, not unittest
 2. Name test files `test_*.py`
 3. Use fixtures for shared setup
-4. Aim for one assertion per test
 EOF
 ```
 
-### 3. Add the skill to your library
+Add it to the library:
 
 ```bash
-skillm add ./my-skill/
-# Added my-skill@v0.1
-
-# Edit the skill and add again — creates v0.2 automatically
-skillm add ./my-skill/
-# Added my-skill@v0.2
-
-# Major version bump when the skill changes significantly
-skillm add ./my-skill/ --major
-# Added my-skill@v1.0
+skillm add ./my-skill/                       # v0.1
+skillm add ./my-skill/                       # v0.2 (auto-increment)
+skillm add ./my-skill/ --major               # v1.0 (major bump)
 ```
 
-### 4. Browse your library
+### 4. Share with your team
 
 ```bash
-# List all skills, grouped by category
-skillm list
-
-# Search across all skill content
-skillm search "pytest"
-
-# See details for one skill
-skillm info my-skill
-
-# See all versions
-skillm versions my-skill
-```
-
-### 5. Use skills in a project
-
-```bash
-cd your-project/
-
-# Install a skill from the library (auto-creates .claude/skills/)
-skillm install my-skill
-
-# Install a specific version
-skillm install my-skill@v0.1 --pin
-
-# Install for a different agent
-skillm install my-skill --agent cursor    # → .cursor/skills/my-skill/
-
-# Inject skill references into your agent config
-skillm inject
-```
-
-Skills are installed into agent-specific directories. By default, `skillm` targets Claude Code (`.claude/skills/`). Use `--agent` to target other agents:
-
-| Agent | Skills directory | Manifest |
-|-------|-----------------|----------|
-| Claude Code | `.claude/skills/` | `.claude/skills.json` |
-| Cursor | `.cursor/skills/` | `.cursor/skills.json` |
-| Codex | `.codex/skills/` | `.codex/skills.json` |
-| OpenClaw | `.openclaw/skills/` | `.openclaw/skills.json` |
-
-After `inject`, your agent config (`CLAUDE.md`, `.cursorrules`, etc.) contains references to the installed skills. Your AI agent now follows those instructions.
-
-### 6. Keep things up to date
-
-```bash
-# Update all project skills to latest library versions
-skillm upgrade
-
-# Or update just one
-skillm upgrade my-skill
-
-# Check what skills a project uses
-skillm doctor
-```
-
-### 7. Import skills from external sources
-
-```bash
-# From GitHub
-skillm import owner/repo
-skillm import owner/repo/subdirectory
-
-# From ClawHub registry
-skillm import clawhub:skill-slug
-
-# From a URL
-skillm import https://example.com/skill.tar.gz
-
-# From a .skillpack archive (portable sharing)
-skillm import ./skill.skillpack
-```
-
-### 8. Share skills with your team
-
-```bash
-# Set up a shared remote library
+# Add a shared remote
 skillm remote add team /home/prgn_share/skillm
-# Or over SSH
-skillm remote add team ssh://user@server:/shared/skillm
 
-# Work locally — all adds go to your local library
-skillm add ./my-skill/
-skillm add ./another-skill/
-
-# When ready, push everything to the team library
+# Push your skills to the team library
 skillm push team
-# Pushed 2 skills to team (2 new)
 
-# Pull latest from team into your local library
+# Pull latest from team
 skillm pull team
-# Pulled 5 skills from team (3 new, 2 updated)
 ```
 
-Push and pull work like git — version numbers are determined by the target library's own history. Only the latest version of each skill is transferred.
+Push and pull work like git — version numbers are determined by the target library's history. Only the latest version of each skill is transferred.
+
+### 5. Import from external sources
+
+```bash
+skillm import owner/repo                     # GitHub
+skillm import owner/repo/subdirectory        # GitHub subdirectory
+skillm import clawhub:skill-slug             # ClawHub registry
+skillm import https://example.com/skill.tar.gz  # URL
+skillm import ./skill.skillpack              # portable archive
+```
 
 ---
 
@@ -350,12 +290,14 @@ skillm inject --file ./custom.md     # custom file path
 
 Supported agents:
 
-| Agent | Config file |
-|-------|-------------|
-| Claude Code | `CLAUDE.md` |
-| Cursor | `.cursorrules` |
-| Codex | `AGENTS.md` |
-| OpenClaw | `AGENTS.md` |
+| Agent | Skills directory | Config file |
+|-------|-----------------|-------------|
+| Claude Code | `.claude/skills/` | `CLAUDE.md` |
+| Cursor | `.cursor/skills/` | `.cursorrules` |
+| Codex | `.codex/skills/` | `AGENTS.md` |
+| OpenClaw | `.openclaw/skills/` | `AGENTS.md` |
+
+Use `--agent` on any project command to target a specific agent (default: claude).
 
 Injected content is wrapped in markers (`<!-- skillm:start -->` / `<!-- skillm:end -->`) and cleanly updated on subsequent runs.
 
