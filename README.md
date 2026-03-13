@@ -95,18 +95,27 @@ skillm versions my-skill
 ```bash
 cd your-project/
 
-# Initialize project for skills
-skillm init
-
-# Install a skill from the library
+# Install a skill from the library (auto-creates .claude/skills/)
 skillm install my-skill
 
 # Install a specific version
 skillm install my-skill@v0.1 --pin
 
+# Install for a different agent
+skillm install my-skill --agent cursor    # → .cursor/skills/my-skill/
+
 # Inject skill references into your agent config
 skillm inject
 ```
+
+Skills are installed into agent-specific directories. By default, `skillm` targets Claude Code (`.claude/skills/`). Use `--agent` to target other agents:
+
+| Agent | Skills directory | Manifest |
+|-------|-----------------|----------|
+| Claude Code | `.claude/skills/` | `.claude/skills.json` |
+| Cursor | `.cursor/skills/` | `.cursor/skills.json` |
+| Codex | `.codex/skills/` | `.codex/skills.json` |
+| OpenClaw | `.openclaw/skills/` | `.openclaw/skills.json` |
 
 After `inject`, your agent config (`CLAUDE.md`, `.cursorrules`, etc.) contains references to the installed skills. Your AI agent now follows those instructions.
 
@@ -161,13 +170,13 @@ skillm remote switch local
 
 ```
 Library (~/.skillm/)              Project (your-repo/)
-├── library.db                    ├── skills.json
-├── remotes.toml                  ├── .skills/
-├── snapshots/                    │   ├── web-scraper/SKILL.md
-└── skills/                       │   └── formatter/SKILL.md
-    ├── web-scraper/v0.1/         └── CLAUDE.md  ← auto-injected
-    ├── web-scraper/v0.2/
-    └── formatter/v1.0/
+├── library.db                    ├── .claude/
+├── remotes.toml                  │   ├── skills.json
+├── snapshots/                    │   └── skills/
+└── skills/                       │       ├── web-scraper/SKILL.md
+    ├── web-scraper/v0.1/         │       └── formatter/SKILL.md
+    ├── web-scraper/v0.2/         ├── .cursor/skills/  ← other agents
+    └── formatter/v1.0/           └── CLAUDE.md  ← auto-injected
 ```
 
 - **Library** stores all your skills with full version history
@@ -425,11 +434,14 @@ CLI (Click)
 
 ### Project
 
+All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `--project-root/-r` options.
+
 | Command | Description |
 |---------|-------------|
-| `skillm init` | Initialize project for skills |
 | `skillm install <name>` | Install skill into project |
 | `skillm install <name>@v0.1 --pin` | Install and pin version |
+| `skillm install <name> -a cursor` | Install for a specific agent |
+| `skillm install <name> -r /path` | Install in a specific project |
 | `skillm uninstall <name>` | Remove skill from project |
 | `skillm sync` | Install missing skills |
 | `skillm upgrade [name]` | Update to latest versions |
