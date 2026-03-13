@@ -15,6 +15,23 @@ Manage a library of reusable skills (instructions, tools, prompts) that any codi
 
 ## Install
 
+### Standalone binary (recommended for teams)
+
+```bash
+make build                           # builds dist/skillm (27MB, no Python needed)
+sudo make install                    # copies to /usr/local/bin/skillm
+```
+
+Or copy to a shared path:
+
+```bash
+make install-shared DESTDIR=/home/prgn_share/bin
+```
+
+Every engineer adds the shared path to their `PATH` — done.
+
+### From source (development)
+
 ```bash
 pip install -e .
 ```
