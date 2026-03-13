@@ -361,6 +361,44 @@ class Library:
         """Get path to skill files in the library."""
         return self.backend.get_skill_files(name, version)
 
+    def push(self, target: "Library") -> list[tuple[str, str, str]]:
+        """Push latest version of each local skill to target library.
+
+        For each skill in self, takes the latest version's files and
+        publishes them to target. Version numbers are determined by
+        the target library's own history.
+
+        Returns list of (name, local_version, target_version).
+        """
+        results = []
+        for skill in self.list_skills():
+            latest = self.db.get_latest_version(skill.id)
+            if latest is None:
+                continue
+            src_dir = self.get_skill_files_path(skill.name, latest.version)
+            _, target_ver = target.publish(src_dir, name=skill.name)
+            results.append((skill.name, latest.version, target_ver))
+        return results
+
+    def pull(self, source: "Library") -> list[tuple[str, str, str]]:
+        """Pull latest version of each skill from source library.
+
+        For each skill in source, takes the latest version's files and
+        publishes them to self. Version numbers are determined by
+        self's own history.
+
+        Returns list of (name, source_version, local_version).
+        """
+        results = []
+        for skill in source.list_skills():
+            latest = source.db.get_latest_version(skill.id)
+            if latest is None:
+                continue
+            src_dir = source.get_skill_files_path(skill.name, latest.version)
+            _, local_ver = self.publish(src_dir, name=skill.name)
+            results.append((skill.name, latest.version, local_ver))
+        return results
+
 
 # Agent config directory mappings
 AGENT_DIRS = {

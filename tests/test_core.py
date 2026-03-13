@@ -163,6 +163,103 @@ def test_project_upgrade(tmp_project, sample_skill):
     assert upgraded[0] == ("my-skill", "v0.1", "v0.2")
 
 
+def test_push(tmp_path, sample_skill):
+    """Push skills from local library to remote library."""
+    from skillm.config import Config
+    from skillm.core import Library
+
+    # Create local library with a skill
+    local_path = tmp_path / "local"
+    local_config = Config()
+    local_config.library.path = str(local_path)
+    local_lib = Library(local_config)
+    local_lib.init()
+    local_lib.publish(sample_skill)
+    local_lib.publish(sample_skill)  # v0.2
+
+    # Create remote library (empty)
+    remote_path = tmp_path / "remote"
+    remote_config = Config()
+    remote_config.library.path = str(remote_path)
+    remote_lib = Library(remote_config)
+    remote_lib.init()
+
+    # Push
+    results = local_lib.push(remote_lib)
+    assert len(results) == 1
+    name, local_ver, remote_ver = results[0]
+    assert name == "my-skill"
+    assert local_ver == "v0.2"  # latest local
+    assert remote_ver == "v0.1"  # first version on remote
+
+    # Remote now has the skill
+    remote_skill = remote_lib.info("my-skill")
+    assert remote_skill is not None
+    assert len(remote_skill.versions) == 1
+
+
+def test_pull(tmp_path, sample_skill):
+    """Pull skills from remote library to local library."""
+    from skillm.config import Config
+    from skillm.core import Library
+
+    # Create remote library with skills
+    remote_path = tmp_path / "remote"
+    remote_config = Config()
+    remote_config.library.path = str(remote_path)
+    remote_lib = Library(remote_config)
+    remote_lib.init()
+    remote_lib.publish(sample_skill)
+
+    # Create local library (empty)
+    local_path = tmp_path / "local"
+    local_config = Config()
+    local_config.library.path = str(local_path)
+    local_lib = Library(local_config)
+    local_lib.init()
+
+    # Pull
+    results = local_lib.pull(remote_lib)
+    assert len(results) == 1
+    name, source_ver, local_ver = results[0]
+    assert name == "my-skill"
+    assert source_ver == "v0.1"
+    assert local_ver == "v0.1"
+
+    # Local now has the skill
+    local_skill = local_lib.info("my-skill")
+    assert local_skill is not None
+
+
+def test_push_increments_remote_version(tmp_path, sample_skill):
+    """Pushing twice increments version on remote."""
+    from skillm.config import Config
+    from skillm.core import Library
+
+    local_path = tmp_path / "local"
+    local_config = Config()
+    local_config.library.path = str(local_path)
+    local_lib = Library(local_config)
+    local_lib.init()
+    local_lib.publish(sample_skill)
+
+    remote_path = tmp_path / "remote"
+    remote_config = Config()
+    remote_config.library.path = str(remote_path)
+    remote_lib = Library(remote_config)
+    remote_lib.init()
+
+    # Push twice
+    results1 = local_lib.push(remote_lib)
+    assert results1[0][2] == "v0.1"
+
+    results2 = local_lib.push(remote_lib)
+    assert results2[0][2] == "v0.2"
+
+    remote_skill = remote_lib.info("my-skill")
+    assert len(remote_skill.versions) == 2
+
+
 def test_project_enable_disable(tmp_project, sample_skill):
     tmp_project.library.publish(sample_skill)
     tmp_project.add("my-skill")

@@ -12,7 +12,7 @@ from rich.table import Table
 
 from . import __version__
 from .config import Config, load_config
-from .core import Library, Project, get_active_library
+from .core import Library, Project, get_active_library, create_library_from_remote
 from .inject import inject as inject_skills
 from .skillpack import export_skill, import_skillpack
 
@@ -243,6 +243,93 @@ def remote_list():
         marker = " [green]← active[/green]" if name == config.active else ""
         kind = "ssh" if r.is_ssh else "local"
         console.print(f"  [bold]{name}[/bold] ({kind}) {r.path}{marker}")
+
+
+# ── Push / Pull ───────────────────────────────────────────
+
+@cli.command("push")
+@click.argument("remote_name")
+def push_cmd(remote_name: str):
+    """Push all skills to a remote library.
+
+    Takes the latest version of each local skill and adds it to the
+    remote. Version numbers are determined by the remote's history.
+    """
+    from .remote import load_remotes
+    config = load_remotes()
+    if remote_name not in config.remotes:
+        console.print(f"[red]Remote '{remote_name}' not found[/red]")
+        return
+    if remote_name == config.active:
+        console.print(f"[red]Cannot push to the active library ('{remote_name}'). Push to a different remote.[/red]")
+        return
+
+    local = _get_library()
+    target = create_library_from_remote(config.remotes[remote_name])
+
+    results = local.push(target)
+    if not results:
+        console.print("[dim]No skills to push.[/dim]")
+        return
+
+    new_count = 0
+    updated_count = 0
+    for name, local_ver, target_ver in results:
+        # Check if skill existed on remote before
+        console.print(f"  [green]{name}[/green] {local_ver} → {target_ver}")
+        if target_ver == "v0.1":
+            new_count += 1
+        else:
+            updated_count += 1
+
+    parts = []
+    if new_count:
+        parts.append(f"{new_count} new")
+    if updated_count:
+        parts.append(f"{updated_count} updated")
+    console.print(f"[green]Pushed {len(results)} skill(s) to {remote_name} ({', '.join(parts)})[/green]")
+
+
+@cli.command("pull")
+@click.argument("remote_name")
+def pull_cmd(remote_name: str):
+    """Pull all skills from a remote library.
+
+    Takes the latest version of each remote skill and adds it to the
+    local library. Version numbers are determined by local history.
+    """
+    from .remote import load_remotes
+    config = load_remotes()
+    if remote_name not in config.remotes:
+        console.print(f"[red]Remote '{remote_name}' not found[/red]")
+        return
+    if remote_name == config.active:
+        console.print(f"[red]Cannot pull from the active library ('{remote_name}'). Pull from a different remote.[/red]")
+        return
+
+    local = _get_library()
+    source = create_library_from_remote(config.remotes[remote_name])
+
+    results = local.pull(source)
+    if not results:
+        console.print("[dim]No skills to pull.[/dim]")
+        return
+
+    new_count = 0
+    updated_count = 0
+    for name, source_ver, local_ver in results:
+        console.print(f"  [green]{name}[/green] {source_ver} → {local_ver}")
+        if local_ver == "v0.1":
+            new_count += 1
+        else:
+            updated_count += 1
+
+    parts = []
+    if new_count:
+        parts.append(f"{new_count} new")
+    if updated_count:
+        parts.append(f"{updated_count} updated")
+    console.print(f"[green]Pulled {len(results)} skill(s) from {remote_name} ({', '.join(parts)})[/green]")
 
 
 # ── Skill Operations ───────────────────────────────────────

@@ -152,17 +152,25 @@ skillm import ./skill.skillpack
 ### 8. Share skills with your team
 
 ```bash
-# Set up a shared remote library over SSH
+# Set up a shared remote library
+skillm remote add team /home/prgn_share/skillm
+# Or over SSH
 skillm remote add team ssh://user@server:/shared/skillm
-skillm remote switch team
 
-# Now all commands operate on the team library
-skillm add ./my-skill/       # adds to team library
-skillm list                   # lists team skills
+# Work locally — all adds go to your local library
+skillm add ./my-skill/
+skillm add ./another-skill/
 
-# Switch back to personal library
-skillm remote switch local
+# When ready, push everything to the team library
+skillm push team
+# Pushed 2 skills to team (2 new)
+
+# Pull latest from team into your local library
+skillm pull team
+# Pulled 5 skills from team (3 new, 2 updated)
 ```
+
+Push and pull work like git — version numbers are determined by the target library's own history. Only the latest version of each skill is transferred.
 
 ---
 
@@ -288,20 +296,24 @@ skillm doctor
 
 ### Remote Libraries
 
-Manage multiple libraries — local, SSH, or network mount:
+Manage remote libraries for sharing with your team:
 
 ```bash
-skillm remote add local ~/.skillm                      # local (default)
-skillm remote add team ssh://user@server:/shared/lib    # SSH remote
-skillm remote add nas /mnt/nas/skillm                   # network mount
+skillm remote add team /home/prgn_share/skillm          # shared path
+skillm remote add team ssh://user@server:/shared/lib     # SSH remote
+skillm remote add nas /mnt/nas/skillm                    # network mount
 
-skillm remote switch team      # all commands now hit team library
-skillm remote list             # show all, mark active
-skillm remote switch local     # back to local
+skillm remote list             # show all remotes
 skillm remote rm old-server    # remove a remote
+
+# Push/pull between local and remote
+skillm push team               # sync local → remote
+skillm pull team               # sync remote → local
 ```
 
-**SSH safety**: writes acquire a remote file lock (`flock`) so multiple team members can safely use the same library without corrupting the database.
+All `add`/`rm`/`update` operations work on your local library. Use `push` and `pull` to sync with remotes — just like git.
+
+**SSH safety**: writes acquire a remote file lock (`flock`) so multiple team members can safely push to the same library without corrupting the database.
 
 ### Database Snapshots
 
@@ -457,14 +469,16 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 | `skillm import <source>` | Import from GitHub/ClawHub/URL/file |
 | `skillm export <name>` | Export as .skillpack |
 
-### Remotes
+### Remotes & Sync
 
 | Command | Description |
 |---------|-------------|
 | `skillm remote add <name> <path>` | Add a remote library |
 | `skillm remote rm <name>` | Remove a remote |
-| `skillm remote switch <name>` | Switch active remote |
+| `skillm remote switch <name>` | Switch active local library |
 | `skillm remote list` | List all remotes |
+| `skillm push <remote>` | Push all skills to remote |
+| `skillm pull <remote>` | Pull all skills from remote |
 
 ## License
 
