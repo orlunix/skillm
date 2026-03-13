@@ -103,14 +103,20 @@ def test_search(tmp_path):
         name="web-scraper", description="Scrape websites",
         created_at="2026-01-01", updated_at="2026-01-01",
     ))
-    db.update_search_content(skill_id, "Use httpx to scrape pages")
+    db.add_tags(skill_id, ["python", "httpx"])
 
+    # Search by description
     results = db.search("scrape")
     assert len(results) == 1
     assert results[0].name == "web-scraper"
 
+    # Search by tag
     results = db.search("httpx")
     assert len(results) == 1
+
+    # No match
+    results = db.search("nonexistent")
+    assert len(results) == 0
     db.close()
 
 

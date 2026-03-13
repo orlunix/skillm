@@ -1,4 +1,4 @@
-"""SQLite + FTS5 database operations."""
+"""SQLite database operations."""
 
 from __future__ import annotations
 
@@ -55,36 +55,9 @@ CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_files_version ON files(version_id);
 """
 
-FTS_SCHEMA = """
-CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
-    name,
-    description,
-    category,
-    tags,
-    content
-);
-"""
-
-FTS_TRIGGERS = """
-CREATE TRIGGER IF NOT EXISTS skills_ai AFTER INSERT ON skills BEGIN
-    INSERT INTO search_index(rowid, name, description, category, tags, content)
-    VALUES (new.id, new.name, new.description, new.category, '', '');
-END;
-
-CREATE TRIGGER IF NOT EXISTS skills_au AFTER UPDATE ON skills BEGIN
-    UPDATE search_index
-    SET name = new.name, description = new.description, category = new.category
-    WHERE rowid = new.id;
-END;
-
-CREATE TRIGGER IF NOT EXISTS skills_ad AFTER DELETE ON skills BEGIN
-    DELETE FROM search_index WHERE rowid = old.id;
-END;
-"""
-
 
 class Database:
-    """SQLite database for skill metadata and full-text search."""
+    """SQLite database for skill metadata."""
 
     def __init__(self, db_path: Path):
         self.db_path = db_path
@@ -100,11 +73,9 @@ class Database:
         return self._conn
 
     def initialize(self) -> None:
-        """Create tables, indexes, FTS, and triggers."""
+        """Create tables and indexes."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn.executescript(SCHEMA)
-        self.conn.executescript(FTS_SCHEMA)
-        self.conn.executescript(FTS_TRIGGERS)
         self.conn.execute(
             "INSERT OR IGNORE INTO library_meta(key, value) VALUES('schema_version', '1')"
         )
@@ -245,12 +216,6 @@ class Database:
                 "INSERT OR IGNORE INTO tags(skill_id, tag) VALUES(?, ?)",
                 (skill_id, tag.strip().lower()),
             )
-        # Update search index tags
-        tag_str = " ".join(t.strip().lower() for t in tags)
-        self.conn.execute(
-            "UPDATE search_index SET tags = ? WHERE rowid = ?",
-            (tag_str, skill_id),
-        )
         self.conn.commit()
 
     def add_tags(self, skill_id: int, tags: list[str]) -> None:
@@ -289,42 +254,30 @@ class Database:
     # ── Search ──────────────────────────────────────────────
 
     def update_search_content(self, skill_id: int, content: str) -> None:
-        """Update the SKILL.md content in the FTS index."""
-        self.conn.execute(
-            "UPDATE search_index SET content = ? WHERE rowid = ?",
-            (content, skill_id),
-        )
-        self.conn.commit()
+        """No-op — kept for API compatibility."""
+        pass
 
     def search(self, query: str) -> list[Skill]:
-        """Full-text search across name, description, tags, and content."""
-        # Quote each token to prevent FTS5 syntax errors from hyphens etc.
-        safe_query = " ".join(f'"{token}"' for token in query.split())
+        """Search across name, description, category, and tags using LIKE."""
+        pattern = f"%{query}%"
         rows = self.conn.execute(
-            "SELECT rowid, rank FROM search_index WHERE search_index MATCH ? ORDER BY rank",
-            (safe_query,),
+            "SELECT DISTINCT s.* FROM skills s "
+            "LEFT JOIN tags t ON s.id = t.skill_id "
+            "WHERE s.name LIKE ? OR s.description LIKE ? OR s.category LIKE ? OR t.tag LIKE ? "
+            "ORDER BY s.name",
+            (pattern, pattern, pattern, pattern),
         ).fetchall()
         skills = []
         for row in rows:
-            skill = self._get_skill_by_id(row["rowid"])
-            if skill:
-                skills.append(skill)
+            skill = Skill(
+                id=row["id"], name=row["name"], description=row["description"],
+                category=row["category"], author=row["author"], source=row["source"],
+                created_at=row["created_at"], updated_at=row["updated_at"],
+            )
+            skill.tags = self.get_tags(skill.id)
+            skill.versions = self.get_versions(skill.id)
+            skills.append(skill)
         return skills
-
-    def _get_skill_by_id(self, skill_id: int) -> Skill | None:
-        row = self.conn.execute(
-            "SELECT * FROM skills WHERE id = ?", (skill_id,)
-        ).fetchone()
-        if not row:
-            return None
-        skill = Skill(
-            id=row["id"], name=row["name"], description=row["description"],
-            category=row["category"], author=row["author"], source=row["source"],
-            created_at=row["created_at"], updated_at=row["updated_at"],
-        )
-        skill.tags = self.get_tags(skill.id)
-        skill.versions = self.get_versions(skill.id)
-        return skill
 
     # ── Library Meta ────────────────────────────────────────
 

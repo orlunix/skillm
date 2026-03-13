@@ -310,7 +310,6 @@ class Library:
         self.db.conn.execute("DELETE FROM files")
         self.db.conn.execute("DELETE FROM versions")
         self.db.conn.execute("DELETE FROM tags")
-        self.db.conn.execute("DELETE FROM search_index")
         self.db.conn.execute("DELETE FROM skills")
         self.db.conn.commit()
 
