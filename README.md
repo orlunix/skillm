@@ -23,28 +23,21 @@ Requires Python 3.10+.
 
 ## Quick Start
 
-### 1. Connect to a library
-
-Use an existing shared library:
+### 1. Pull skills and install into your project
 
 ```bash
+# Initialize your local library
+skillm library init
+
+# Add the team's shared remote
 skillm remote add team /home/prgn_share/skillm
-skillm remote switch team
-```
 
-Or create your own:
+# Pull all skills from the remote into your local library
+skillm pull team
+# Pulled 5 skills from team (5 new)
 
-```bash
-skillm library init                          # creates ~/.skillm/
-```
-
-### 2. Browse and install skills
-
-```bash
-# See what's available
+# Browse what's available
 skillm list
-
-# Search for something specific
 skillm search "pytest"
 
 # Install a skill into your project
@@ -55,15 +48,13 @@ skillm install my-skill
 # Install for a different agent
 skillm install my-skill --agent cursor       # → .cursor/skills/
 
-# Keep skills up to date
+# Keep project skills up to date
 skillm upgrade
 ```
 
-That's it — your AI agent now has access to the skill. `install` auto-creates the agent directory and copies skill files.
+### 2. Manage skills in your local library
 
-### 3. Create your own skills
-
-A skill is a directory with a `SKILL.md` file:
+Create a skill — just a directory with a `SKILL.md`:
 
 ```bash
 mkdir my-skill
@@ -86,7 +77,7 @@ When asked to write tests:
 EOF
 ```
 
-Add it to the library:
+Add it to your local library:
 
 ```bash
 skillm add ./my-skill/                       # v0.1
@@ -94,30 +85,34 @@ skillm add ./my-skill/                       # v0.2 (auto-increment)
 skillm add ./my-skill/ --major               # v1.0 (major bump)
 ```
 
-### 4. Share with your team
-
-```bash
-# Add a shared remote
-skillm remote add team /home/prgn_share/skillm
-
-# Push your skills to the team library
-skillm push team
-
-# Pull latest from team
-skillm pull team
-```
-
-Push and pull work like git — version numbers are determined by the target library's history. Only the latest version of each skill is transferred.
-
-### 5. Import from external sources
+Or import from external sources:
 
 ```bash
 skillm import owner/repo                     # GitHub
-skillm import owner/repo/subdirectory        # GitHub subdirectory
 skillm import clawhub:skill-slug             # ClawHub registry
 skillm import https://example.com/skill.tar.gz  # URL
 skillm import ./skill.skillpack              # portable archive
 ```
+
+Manage versions and metadata:
+
+```bash
+skillm versions my-skill                     # list all versions
+skillm info my-skill                         # show details
+skillm rm my-skill --version v0.1            # remove a version
+skillm tag my-skill python web               # add tags
+skillm update ./my-skill/                    # replace latest version in-place
+```
+
+### 3. Push to the remote server
+
+```bash
+# Push all your local skills to the team library
+skillm push team
+# Pushed 3 skills to team (2 new, 1 updated)
+```
+
+Version numbers are determined by the remote's own history. Only the latest version of each skill is pushed — like merging a branch, not replicating history.
 
 ---
 
