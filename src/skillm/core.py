@@ -517,9 +517,15 @@ class Project:
             if ver is None:
                 raise ValueError(f"Version '{version}' not found for '{name}'")
 
+        # Parse qualified name: "library/skill" → library="library", skill="skill"
+        if "/" in name:
+            lib_name, skill_name = name.split("/", 1)
+        else:
+            lib_name, skill_name = None, name
+
         # Copy files from library to project
-        src = self.library.get_skill_files_path(name, version)
-        dest = self.skills_dir / name
+        src = self.library.get_skill_files_path(skill_name, version, library=lib_name)
+        dest = self.skills_dir / skill_name
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(src, dest)
