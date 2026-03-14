@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "skillm"
-version = "2.0.0"
+version = "0.2.0"
 description = "Local-first, offline-capable skill manager for AI coding agents"
 readme = "README.md"
 requires-python = ">=3.10"

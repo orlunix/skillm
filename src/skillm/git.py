@@ -9,7 +9,10 @@ import re
 import subprocess
 from pathlib import Path
 
-_VERSION_TAG_RE = re.compile(r"^(.+)/v(\d+)\.(\d+)$")
+# Two-level: skill/vMAJOR.MINOR (legacy)
+_VERSION_TAG_RE_2 = re.compile(r"^([^/]+)/v(\d+)\.(\d+)$")
+# Three-level: library/skill/vMAJOR.MINOR
+_VERSION_TAG_RE_3 = re.compile(r"^([^/]+)/([^/]+)/v(\d+)\.(\d+)$")
 
 
 class GitError(Exception):
@@ -57,6 +60,76 @@ class GitRepo:
             return result.returncode == 0
         except Exception:
             return False
+
+    # ── Branch operations ─────────────────────────────────────
+
+    def current_branch(self) -> str:
+        """Get the name of the current branch."""
+        result = self._run("branch", "--show-current")
+        return result.stdout.strip()
+
+    def list_branches(self, all: bool = False) -> list[str]:
+        """List branch names. If all=True, includes remote-tracking branches."""
+        args = ["branch", "--format=%(refname:short)"]
+        if all:
+            args.append("-a")
+        result = self._run(*args)
+        branches = result.stdout.strip().split("\n")
+        return [b for b in branches if b]
+
+    def create_branch(self, name: str, orphan: bool = False) -> None:
+        """Create and switch to a new branch.
+
+        If orphan=True, creates an orphan branch (no history) with an init commit.
+        """
+        if orphan:
+            self._run("checkout", "--orphan", name)
+            # Remove any files from the index (inherited from previous branch)
+            self._run("rm", "-rf", "--cached", ".", check=False)
+            # Clean working tree of files from previous branch
+            for item in self.path.iterdir():
+                if item.name == ".git":
+                    continue
+                if item.is_dir():
+                    import shutil
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+            self._run("commit", "--allow-empty", "-m", "skillm: init")
+        else:
+            self._run("checkout", "-b", name)
+
+    def switch_branch(self, name: str) -> None:
+        """Switch to an existing branch."""
+        self._run("checkout", name)
+
+    def delete_branch(self, name: str) -> None:
+        """Delete a branch."""
+        self._run("branch", "-D", name)
+
+    def branch_exists(self, name: str) -> bool:
+        """Check if a local branch exists."""
+        result = self._run("branch", "--list", name)
+        return bool(result.stdout.strip())
+
+    def set_upstream(self, remote: str, branch: str | None = None) -> None:
+        """Set upstream tracking for the current branch."""
+        branch = branch or self.current_branch()
+        self._run("branch", f"--set-upstream-to={remote}/{branch}")
+
+    def unset_upstream(self) -> None:
+        """Remove upstream tracking for the current branch."""
+        self._run("branch", "--unset-upstream")
+
+    def get_upstream(self) -> str | None:
+        """Get the upstream tracking ref for the current branch, or None."""
+        result = self._run(
+            "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}",
+            check=False,
+        )
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
 
     # ── Basic operations ─────────────────────────────────────
 
@@ -187,9 +260,36 @@ class GitRepo:
 
     # ── Remote operations ────────────────────────────────────
 
+    def add_remote(self, name: str, url: str) -> None:
+        """Add a git remote."""
+        self._run("remote", "add", name, url)
+
+    def remove_remote(self, name: str) -> None:
+        """Remove a git remote."""
+        self._run("remote", "remove", name)
+
+    def list_remotes(self) -> list[tuple[str, str]]:
+        """List remotes as (name, url) pairs."""
+        result = self._run("remote", "-v", check=False)
+        if not result.stdout.strip():
+            return []
+        seen = {}
+        for line in result.stdout.strip().split("\n"):
+            parts = line.split()
+            if len(parts) >= 2 and parts[0] not in seen:
+                seen[parts[0]] = parts[1]
+        return sorted(seen.items())
+
+    def has_remote(self, name: str = "origin") -> bool:
+        """Check if a remote exists."""
+        result = self._run("remote")
+        remotes = result.stdout.strip().split("\n")
+        return name in remotes
+
     def push(self, remote: str = "origin", include_tags: bool = True) -> str:
-        """Push to remote."""
-        args = ["push", remote]
+        """Push current branch to remote."""
+        branch = self.current_branch()
+        args = ["push", "-u", remote, branch]
         if include_tags:
             args.append("--tags")
         result = self._run(*args, check=False)
@@ -205,35 +305,45 @@ class GitRepo:
             raise GitError(f"pull failed: {(result.stderr or '').strip()}")
         return (result.stdout or "").strip()
 
-    def has_remote(self, name: str = "origin") -> bool:
-        """Check if a remote exists."""
-        result = self._run("remote")
-        remotes = result.stdout.strip().split("\n")
-        return name in remotes
-
     def fetch(self, remote: str = "origin") -> None:
         """Fetch from remote."""
         self._run("fetch", remote, "--tags")
 
-    # ── Version helpers ──────────────────────────────────────
+    # ── Version helpers (three-level tags) ──────────────────
 
-    def skill_versions(self, skill_name: str) -> list[tuple[str, int, int]]:
+    def skill_versions(
+        self, skill_name: str, library: str | None = None,
+    ) -> list[tuple[str, int, int]]:
         """Get all versions for a skill from tags.
+
+        If library is given, looks for three-level tags: library/skill/vX.Y
+        Otherwise, looks for two-level tags: skill/vX.Y (legacy compat).
 
         Returns list of (tag_name, major, minor) sorted by version.
         """
-        tags = self.list_tags(f"{skill_name}/v*")
-        versions = []
-        for t in tags:
-            m = _VERSION_TAG_RE.match(t)
-            if m and m.group(1) == skill_name:
-                versions.append((t, int(m.group(2)), int(m.group(3))))
+        if library:
+            tags = self.list_tags(f"{library}/{skill_name}/v*")
+            versions = []
+            for t in tags:
+                m = _VERSION_TAG_RE_3.match(t)
+                if m and m.group(1) == library and m.group(2) == skill_name:
+                    versions.append((t, int(m.group(3)), int(m.group(4))))
+        else:
+            tags = self.list_tags(f"{skill_name}/v*")
+            versions = []
+            for t in tags:
+                m = _VERSION_TAG_RE_2.match(t)
+                if m and m.group(1) == skill_name:
+                    versions.append((t, int(m.group(2)), int(m.group(3))))
+
         versions.sort(key=lambda x: (x[1], x[2]))
         return versions
 
-    def next_version(self, skill_name: str, major: bool = False) -> str:
+    def next_version(
+        self, skill_name: str, library: str | None = None, major: bool = False,
+    ) -> str:
         """Compute the next version string for a skill."""
-        versions = self.skill_versions(skill_name)
+        versions = self.skill_versions(skill_name, library=library)
         if not versions:
             return "v1.0" if major else "v0.1"
 
@@ -242,15 +352,33 @@ class GitRepo:
             return f"v{max_maj + 1}.0"
         return f"v{max_maj}.{max_min + 1}"
 
+    def parse_all_tags(self) -> list[tuple[str, str, str]]:
+        """Parse all version tags in the repo.
+
+        Returns list of (library, skill_name, version) tuples.
+        Handles both three-level (library/skill/vX.Y) and
+        two-level (skill/vX.Y, treated as library='main') tags.
+        """
+        all_tags = self.list_tags()
+        result = []
+        for t in all_tags:
+            m = _VERSION_TAG_RE_3.match(t)
+            if m:
+                result.append((m.group(1), m.group(2), f"v{m.group(3)}.{m.group(4)}"))
+                continue
+            m = _VERSION_TAG_RE_2.match(t)
+            if m:
+                # Legacy two-level tag → treat as library "main"
+                result.append(("main", m.group(1), f"v{m.group(2)}.{m.group(3)}"))
+        return result
+
     def list_skill_dirs(self) -> list[str]:
         """List top-level directories that contain SKILL.md (i.e., skills)."""
         if not self.is_repo():
             return []
-        # Look for any SKILL.md files in the working tree
         skills = set()
         for skill_md in self.path.rglob("SKILL.md"):
             rel = skill_md.relative_to(self.path)
-            # Top-level skill: SKILL.md is at <skill-name>/SKILL.md
             parts = rel.parts
             if len(parts) == 2 and parts[1] == "SKILL.md":
                 skills.add(parts[0])
