@@ -3,17 +3,21 @@
 from click.testing import CliRunner
 from pathlib import Path
 from skillm.cli import cli
-from skillm.config import Config
-from skillm.core import Library
+from skillm.config import Config, Source
+from skillm.core import SourceManager
 
 
-def _init_library(tmp_path):
-    lib_path = tmp_path / "library"
+def _setup_sm(tmp_path):
+    """Create a SourceManager with a temp source repo."""
+    source_path = tmp_path / "source-repo"
+    cache_path = tmp_path / "cache"
     config = Config()
-    config.library.path = str(lib_path)
-    lib = Library(config)
-    lib.init()
-    return lib_path
+    config.settings.cache_dir = str(cache_path)
+    config.settings.default_source = "test"
+    config.sources = [Source(name="test", url=str(source_path), priority=10)]
+    sm = SourceManager(config)
+    sm.init_source("test", str(source_path))
+    return sm
 
 
 def _create_skill(tmp_path, name="test-skill"):
@@ -27,32 +31,27 @@ def test_version():
     runner = CliRunner()
     result = runner.invoke(cli, ["--version"])
     assert result.exit_code == 0
-    assert "0.2.0" in result.output
+    assert "2.0.0" in result.output
 
 
-def test_library_init(tmp_path, monkeypatch):
+def test_source_init_and_list(tmp_path, monkeypatch):
+    sm = _setup_sm(tmp_path)
+
+    import skillm.cli
+    monkeypatch.setattr(skillm.cli, "_get_source_manager", lambda: sm)
+
     runner = CliRunner()
-    lib_path = tmp_path / "lib"
-    result = runner.invoke(cli, ["library", "init", "--path", str(lib_path)])
+    result = runner.invoke(cli, ["source", "list"])
     assert result.exit_code == 0
-    assert "initialized" in result.output.lower()
-    assert (lib_path / "library.db").exists()
+    assert "test" in result.output
 
 
 def test_add_and_list(tmp_path, monkeypatch):
-    lib_path = _init_library(tmp_path)
+    sm = _setup_sm(tmp_path)
     skill_dir = _create_skill(tmp_path)
 
-    monkeypatch.setenv("SKILLM_LIBRARY_PATH", str(lib_path))
-
-    # Patch load_config to use our temp library
     import skillm.cli
-    original_get_library = skillm.cli._get_library
-    def patched_get_library():
-        config = Config()
-        config.library.path = str(lib_path)
-        return Library(config)
-    monkeypatch.setattr(skillm.cli, "_get_library", patched_get_library)
+    monkeypatch.setattr(skillm.cli, "_get_source_manager", lambda: sm)
 
     runner = CliRunner()
 
@@ -65,5 +64,19 @@ def test_add_and_list(tmp_path, monkeypatch):
     assert "test-skill" in result.output
 
     result = runner.invoke(cli, ["info", "test-skill"])
+    assert result.exit_code == 0
+    assert "test-skill" in result.output
+
+
+def test_publish(tmp_path, monkeypatch):
+    sm = _setup_sm(tmp_path)
+    skill_dir = _create_skill(tmp_path)
+    sm.add_skill(skill_dir)
+
+    import skillm.cli
+    monkeypatch.setattr(skillm.cli, "_get_source_manager", lambda: sm)
+
+    runner = CliRunner()
+    result = runner.invoke(cli, ["publish", "test-skill"])
     assert result.exit_code == 0
     assert "test-skill" in result.output

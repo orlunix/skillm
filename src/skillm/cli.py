@@ -1,4 +1,4 @@
-"""Click CLI for skillm."""
+"""Click CLI for skillm v2 — git-backed package manager."""
 
 from __future__ import annotations
 
@@ -11,34 +11,32 @@ from rich.console import Console
 from rich.table import Table
 
 from . import __version__
-from .config import Config, load_config
-from .core import Library, Project, get_active_library, create_library_from_remote
+from .config import Config, Source, load_config, save_config
+from .core import SourceManager, Project
+from .git import GitError
 from .inject import inject as inject_skills
 from .skillpack import export_skill, import_skillpack
 
 console = Console()
 
 
-def _get_library() -> Library:
+def _get_source_manager() -> SourceManager:
     try:
-        return get_active_library()
+        return SourceManager()
     except Exception:
-        # Auto-init local library on first use
         config = Config()
-        lib = Library(config)
-        lib.init()
-        return lib
+        return SourceManager(config)
 
 
 def _get_project(
-    library: Library | None = None,
+    source_manager: SourceManager | None = None,
     agent: str = "claude",
     project_root: str | None = None,
 ) -> Project:
     project_dir = Path(project_root).resolve() if project_root else None
     return Project(
         project_dir=project_dir,
-        library=library or _get_library(),
+        source_manager=source_manager or _get_source_manager(),
         agent=agent,
     )
 
@@ -56,321 +54,89 @@ def _format_size(size_bytes: int) -> str:
 @click.group()
 @click.version_option(__version__)
 def cli():
-    """skillm — Local-first skill manager for AI coding agents."""
+    """skillm — Git-backed skill manager for AI coding agents."""
 
 
-# ── Library ─────────────────────────────────────────────────
-
-@cli.group()
-def library():
-    """Manage the skill library."""
-
-
-@library.command("init")
-@click.option("--path", default=None, help="Library path (default: ~/.skillm)")
-def library_init(path: str | None):
-    """Initialize a new skill library."""
-    config = Config()
-    if path:
-        config.library.path = path
-    lib = Library(config)
-    lib.init()
-    console.print(f"[green]Library initialized at {lib.config.library_path}[/green]")
-
-
-@library.command("stats")
-def library_stats():
-    """Show library statistics."""
-    lib = _get_library()
-    s = lib.stats()
-    console.print(
-        f"Skills: [bold]{s['skills']}[/bold] | "
-        f"Versions: [bold]{s['versions']}[/bold] | "
-        f"Size: [bold]{_format_size(s['total_size'])}[/bold] | "
-        f"Backend: [bold]{s['backend']}[/bold]"
-    )
-
-
-@library.command("rebuild")
-def library_rebuild():
-    """Rebuild database from skill files on disk."""
-    lib = _get_library()
-    count = lib.rebuild()
-    console.print(f"[green]Rebuilt database: {count} skill version(s) indexed.[/green]")
-
-
-@library.command("compact")
-def library_compact():
-    """Compact the database (VACUUM)."""
-    lib = _get_library()
-    lib.db.vacuum()
-    console.print("[green]Database compacted.[/green]")
-
-
-@library.command("check")
-def library_check():
-    """Check library integrity."""
-    lib = _get_library()
-    disk_skills = dict(lib.backend.list_skill_dirs())
-    db_skills = {s.name: [v.version for v in s.versions] for s in lib.list_skills()}
-
-    issues = []
-    for name, versions in disk_skills.items():
-        if name not in db_skills:
-            issues.append(f"On disk but not in DB: {name}")
-        else:
-            for v in versions:
-                if v not in db_skills[name]:
-                    issues.append(f"On disk but not in DB: {name}/{v}")
-
-    for name, versions in db_skills.items():
-        if name not in disk_skills:
-            issues.append(f"In DB but not on disk: {name}")
-        else:
-            for v in versions:
-                if v not in disk_skills[name]:
-                    issues.append(f"In DB but not on disk: {name}/{v}")
-
-    if issues:
-        console.print(f"[yellow]Found {len(issues)} issue(s):[/yellow]")
-        for issue in issues:
-            console.print(f"  - {issue}")
-        console.print("[dim]Run 'skillm library rebuild' to fix.[/dim]")
-    else:
-        console.print("[green]Library OK — DB matches disk.[/green]")
-
-
-@library.command("snapshots")
-def library_snapshots():
-    """List database snapshots."""
-    from .snapshot import list_snapshots
-    lib = _get_library()
-    snaps = list_snapshots(lib.config.library_path)
-
-    if not snaps:
-        console.print("[dim]No snapshots.[/dim]")
-        return
-
-    for i, (path, ts) in enumerate(snaps):
-        size = _format_size(path.stat().st_size)
-        marker = " [green]← latest[/green]" if i == 0 else ""
-        console.print(f"  {path.name}  {ts}  ({size}){marker}")
-
-
-@library.command("rollback")
-@click.argument("snapshot", required=False)
-def library_rollback(snapshot: str | None):
-    """Rollback the database to a snapshot.
-
-    Without arguments, rolls back to the most recent snapshot.
-    Pass a snapshot filename to restore a specific one.
-    """
-    from .snapshot import list_snapshots, rollback, snapshot_dir
-
-    lib = _get_library()
-    snap_path = None
-    if snapshot:
-        snap_path = snapshot_dir(lib.config.library_path) / snapshot
-        if not snap_path.exists():
-            console.print(f"[red]Snapshot not found: {snapshot}[/red]")
-            return
-
-    try:
-        restored = rollback(lib.config.library_path, snap_path)
-        console.print(f"[green]Rolled back to {restored.name}[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-
-
-# ── Remote Management ─────────────────────────────────────
+# ── Source Management ──────────────────────────────────────
 
 @cli.group()
-def remote():
-    """Manage remote libraries."""
+def source():
+    """Manage skill sources (git repositories)."""
 
 
-@remote.command("add")
+@source.command("init")
 @click.argument("name")
 @click.argument("path")
-def remote_add(name: str, path: str):
-    """Add a remote library.
-
-    \b
-    PATH can be:
-      /path/to/library           Local path
-      ssh://user@host:/path      SSH remote
-    """
-    from .remote import add_remote
-    config = add_remote(name, path)
-    console.print(f"[green]Added remote '{name}' → {path}[/green]")
-    if config.active == name:
-        console.print(f"[dim]Active remote: {name}[/dim]")
+@click.option("--priority", "-p", default=10, help="Source priority (lower = higher)")
+def source_init(name: str, path: str, priority: int):
+    """Initialize a new source (creates git repo if needed)."""
+    sm = _get_source_manager()
+    src = sm.init_source(name, path, priority)
+    console.print(f"[green]Initialized source '{name}' at {src.resolved_path}[/green]")
 
 
-@remote.command("rm")
+@source.command("add")
 @click.argument("name")
-def remote_rm(name: str):
-    """Remove a remote library."""
-    from .remote import remove_remote
-    try:
-        config = remove_remote(name)
-        console.print(f"[green]Removed remote '{name}'[/green]")
-        console.print(f"[dim]Active remote: {config.active}[/dim]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+@click.argument("url")
+@click.option("--priority", "-p", default=10, help="Source priority (lower = higher)")
+def source_add(name: str, url: str, priority: int):
+    """Add an existing source."""
+    sm = _get_source_manager()
+    sm.add_source(name, url, priority)
+    console.print(f"[green]Added source '{name}' → {url}[/green]")
 
 
-@remote.command("switch")
+@source.command("rm")
 @click.argument("name")
-def remote_switch(name: str):
-    """Switch the active remote library."""
-    from .remote import switch_remote
-    try:
-        switch_remote(name)
-        console.print(f"[green]Switched to '{name}'[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+def source_rm(name: str):
+    """Remove a source (does not delete the git repo)."""
+    sm = _get_source_manager()
+    sm.remove_source(name)
+    console.print(f"[green]Removed source '{name}'[/green]")
 
 
-@remote.command("list")
-def remote_list():
-    """List all remote libraries."""
-    from .remote import load_remotes
-    config = load_remotes()
-
-    if not config.remotes:
-        console.print("[dim]No remotes configured.[/dim]")
+@source.command("list")
+def source_list():
+    """List all configured sources."""
+    sm = _get_source_manager()
+    if not sm.config.sources:
+        console.print("[dim]No sources configured.[/dim]")
         return
 
-    for name, r in sorted(config.remotes.items()):
-        marker = " [green]← active[/green]" if name == config.active else ""
-        kind = "ssh" if r.is_ssh else "local"
-        console.print(f"  [bold]{name}[/bold] ({kind}) {r.path}{marker}")
+    default = sm.config.settings.default_source
+    for src in sm.config.sources:
+        marker = " [green]<- default[/green]" if src.name == default else ""
+        remote_info = " (remote)" if src.is_remote else ""
+        console.print(
+            f"  [bold]{src.name}[/bold] (priority: {src.priority}){remote_info} "
+            f"{src.url}{marker}"
+        )
 
 
-# ── Push / Pull ───────────────────────────────────────────
-
-def _resolve_remote(remote_name: str | None) -> tuple[str, "Remote"] | None:
-    """Resolve remote name, defaulting to the first non-active remote.
-
-    Returns (name, Remote) or None if no suitable remote found.
-    """
-    from .remote import load_remotes
-    config = load_remotes()
-
-    if remote_name:
-        if remote_name not in config.remotes:
-            console.print(f"[red]Remote '{remote_name}' not found[/red]")
-            return None
-        if remote_name == config.active:
-            console.print(f"[red]Cannot use the active library ('{remote_name}'). Specify a different remote.[/red]")
-            return None
-        return remote_name, config.remotes[remote_name]
-
-    # Default: pick the first non-active remote
-    for name, r in config.remotes.items():
-        if name != config.active:
-            return name, r
-
-    console.print("[red]No remote configured. Run: skillm remote add <name> <path>[/red]")
-    return None
+@source.command("default")
+@click.argument("name")
+def source_default(name: str):
+    """Set the default source."""
+    sm = _get_source_manager()
+    sm.set_default(name)
+    console.print(f"[green]Default source: {name}[/green]")
 
 
-@cli.command("push")
-@click.argument("remote_name", required=False, default=None)
-def push_cmd(remote_name: str | None):
-    """Push all skills to a remote library.
-
-    Takes the latest version of each local skill and adds it to the
-    remote. Version numbers are determined by the remote's history.
-
-    If REMOTE_NAME is omitted, pushes to the default remote.
-    """
-    resolved = _resolve_remote(remote_name)
-    if resolved is None:
-        return
-    remote_name, remote = resolved
-
-    local = _get_library()
-    target = create_library_from_remote(remote)
-
-    results = local.push(target)
-    if not results:
-        console.print("[dim]No skills to push.[/dim]")
-        return
-
-    new_count = 0
-    updated_count = 0
-    for name, local_ver, target_ver in results:
-        console.print(f"  [green]{name}[/green] {local_ver} → {target_ver}")
-        if target_ver == "v0.1":
-            new_count += 1
-        else:
-            updated_count += 1
-
-    parts = []
-    if new_count:
-        parts.append(f"{new_count} new")
-    if updated_count:
-        parts.append(f"{updated_count} updated")
-    console.print(f"[green]Pushed {len(results)} skill(s) to {remote_name} ({', '.join(parts)})[/green]")
-
-
-@cli.command("pull")
-@click.argument("remote_name", required=False, default=None)
-def pull_cmd(remote_name: str | None):
-    """Pull all skills from a remote library.
-
-    Takes the latest version of each remote skill and adds it to the
-    local library. Version numbers are determined by local history.
-
-    If REMOTE_NAME is omitted, pulls from the default remote.
-    """
-    resolved = _resolve_remote(remote_name)
-    if resolved is None:
-        return
-    remote_name, remote = resolved
-
-    local = _get_library()
-    source = create_library_from_remote(remote)
-
-    results = local.pull(source)
-    if not results:
-        console.print("[dim]No skills to pull.[/dim]")
-        return
-
-    new_count = 0
-    updated_count = 0
-    for name, source_ver, local_ver in results:
-        console.print(f"  [green]{name}[/green] {source_ver} → {local_ver}")
-        if local_ver == "v0.1":
-            new_count += 1
-        else:
-            updated_count += 1
-
-    parts = []
-    if new_count:
-        parts.append(f"{new_count} new")
-    if updated_count:
-        parts.append(f"{updated_count} updated")
-    console.print(f"[green]Pulled {len(results)} skill(s) from {remote_name} ({', '.join(parts)})[/green]")
-
-
-# ── Skill Operations ───────────────────────────────────────
+# ── Skill Operations ──────────────────────────────────────
 
 @cli.command("add")
-@click.argument("source", type=click.Path(exists=True))
+@click.argument("source_dir", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
-@click.option("--major", is_flag=True, help="Bump major version (v1.0 → v2.0)")
-@click.option("--version", default=None, help="Explicit version string")
+@click.option("--source", "-s", "source_name", default=None, help="Target source")
+@click.option("--message", "-m", default=None, help="Commit message")
 @click.option("-c", "--category", default=None, help="Set skill category")
-def add_cmd(source: str, name: str | None, major: bool, version: str | None, category: str | None):
-    """Add a skill to the library. Creates a new minor version by default."""
+def add_cmd(source_dir: str, name: str | None, source_name: str | None, message: str | None, category: str | None):
+    """Add a skill to a source repository (git commit)."""
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
-    lib = _get_library()
-    source_path = Path(source)
+    sm = _get_source_manager()
+    source_path = Path(source_dir)
 
     # Auto-scan to suggest missing requirements
     try:
@@ -386,64 +152,59 @@ def add_cmd(source: str, name: str | None, major: bool, version: str | None, cat
             if missing.env:
                 console.print(f"  env: {missing.env}")
             console.print("[dim]Consider adding these to your SKILL.md frontmatter.[/dim]")
-    except (FileNotFoundError, Exception):
+    except Exception:
         pass
 
-    skill_name, ver = lib.publish(source_path, name=name, version=version, major=major)
+    skill_name, src_name = sm.add_skill(source_path, source_name=source_name, name=name, message=message)
 
     if category:
-        skill = lib.info(skill_name)
+        skill = sm.info(skill_name, source=src_name)
         if skill:
             skill.category = category.strip().lower()
-            lib.db.update_skill(skill)
+            from datetime import datetime, timezone
+            skill.updated_at = datetime.now(timezone.utc).isoformat()
+            sm.db.update_skill(skill)
 
-    console.print(f"[green]Added {skill_name}@{ver}[/green]")
+    console.print(f"[green]Added {skill_name} to source '{src_name}'[/green]")
 
 
-@cli.command("update")
-@click.argument("source", type=click.Path(exists=True))
-@click.option("--name", default=None, help="Override skill name")
-def update_cmd(source: str, name: str | None):
-    """Replace the latest version of an existing skill in-place.
-
-    Unlike 'add' which creates a new version, 'update' overwrites the
-    latest version. Useful for fixing typos or small corrections.
-
-    Errors if the skill doesn't exist — use 'add' for new skills.
-    """
-    lib = _get_library()
-    source_path = Path(source)
-    try:
-        skill_name, ver = lib.override(source_path, name=name)
-        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+@cli.command("publish")
+@click.argument("name")
+@click.option("--major", is_flag=True, help="Bump major version (v1.0 -> v2.0)")
+@click.option("--source", "-s", "source_name", default=None, help="Target source")
+@click.option("--message", "-m", default=None, help="Tag message")
+def publish_cmd(name: str, major: bool, source_name: str | None, message: str | None):
+    """Create a version tag for a skill."""
+    sm = _get_source_manager()
+    skill_name, version = sm.publish(name, source_name=source_name, major=major, message=message)
+    console.print(f"[green]Published {skill_name}@{version}[/green]")
 
 
 @cli.command("rm")
 @click.argument("name")
 @click.option("--version", default=None, help="Remove specific version only")
-def rm_cmd(name: str, version: str | None):
-    """Remove a skill from the library."""
-    lib = _get_library()
-    if lib.remove(name, version=version):
-        target = f"{name}@{version}" if version else name
-        console.print(f"[green]Removed {target}[/green]")
-    else:
-        console.print(f"[red]Skill '{name}' not found[/red]")
+@click.option("--source", "-s", "source_name", default=None, help="Target source")
+def rm_cmd(name: str, version: str | None, source_name: str | None):
+    """Remove a skill from a source."""
+    sm = _get_source_manager()
+    sm.remove_skill(name, source_name=source_name, version=version)
+    target = f"{name}@{version}" if version else name
+    console.print(f"[green]Removed {target}[/green]")
 
 
 @cli.command()
 @click.argument("name")
-def info(name: str):
+@click.option("--source", "-s", "source_name", default=None, help="Source to query")
+def info(name: str, source_name: str | None):
     """Show skill details."""
-    lib = _get_library()
-    skill = lib.info(name)
+    sm = _get_source_manager()
+    skill = sm.info(name, source=source_name)
     if skill is None:
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
 
     console.print(f"[bold]Name:[/bold] {skill.name}")
+    console.print(f"[bold]Source:[/bold] {skill.source}")
     console.print(f"[bold]Description:[/bold] {skill.description}")
     if skill.category:
         console.print(f"[bold]Category:[/bold] {skill.category}")
@@ -451,103 +212,77 @@ def info(name: str):
         console.print(f"[bold]Tags:[/bold] {', '.join(skill.tags)}")
     if skill.author:
         console.print(f"[bold]Author:[/bold] {skill.author}")
-    if skill.source:
-        console.print(f"[bold]Source:[/bold] {skill.source}")
     if skill.versions:
         ver_str = ", ".join(v.version for v in skill.versions)
         latest = skill.versions[-1].version
         console.print(f"[bold]Versions:[/bold] {ver_str} (latest: {latest})")
-        total = sum(v.total_size for v in skill.versions)
-        total_files = sum(v.file_count for v in skill.versions)
-        console.print(f"[bold]Files:[/bold] {total_files} ({_format_size(total)})")
 
 
 @cli.command("list")
 @click.option("-c", "--category", default=None, help="Filter by category")
-def list_cmd(category: str | None):
-    """List all skills in the library."""
-    lib = _get_library()
+@click.option("--source", "-s", "source_name", default=None, help="Filter by source")
+def list_cmd(category: str | None, source_name: str | None):
+    """List all skills."""
+    sm = _get_source_manager()
 
     if category:
-        skills = lib.db.list_skills_by_category(category)
+        skills = sm.db.list_skills_by_category(category)
     else:
-        skills = lib.list_skills()
+        skills = sm.list_skills(source=source_name)
 
     if not skills:
-        msg = f"No skills in category '{category}'." if category else "No skills in library."
+        msg = f"No skills in category '{category}'." if category else "No skills found."
         console.print(f"[dim]{msg}[/dim]")
         return
 
-    if not category:
-        # Group by category
-        grouped: dict[str, list] = {}
-        for skill in skills:
-            cat = skill.category or "general"
-            grouped.setdefault(cat, []).append(skill)
+    # Group by source
+    grouped: dict[str, list] = {}
+    for skill in skills:
+        grouped.setdefault(skill.source, []).append(skill)
 
-        for cat in sorted(grouped):
-            table = Table(show_header=True, title=cat, title_style="bold cyan")
-            table.add_column("Name", style="bold")
-            table.add_column("Latest")
-            table.add_column("Tags")
-            table.add_column("Size", justify="right")
-
-            for skill in grouped[cat]:
-                latest = skill.versions[-1] if skill.versions else None
-                table.add_row(
-                    skill.name,
-                    latest.version if latest else "-",
-                    ", ".join(skill.tags) if skill.tags else "",
-                    _format_size(latest.total_size) if latest else "-",
-                )
-
-            console.print(table)
-            console.print()
-    else:
-        table = Table(show_header=True, title=category, title_style="bold cyan")
+    for src_name in sorted(grouped):
+        table = Table(show_header=True, title=src_name, title_style="bold cyan")
         table.add_column("Name", style="bold")
         table.add_column("Latest")
+        table.add_column("Category")
         table.add_column("Tags")
-        table.add_column("Size", justify="right")
 
-        for skill in skills:
+        for skill in grouped[src_name]:
             latest = skill.versions[-1] if skill.versions else None
             table.add_row(
                 skill.name,
-                latest.version if latest else "-",
+                latest.version if latest else "(unpublished)",
+                skill.category or "",
                 ", ".join(skill.tags) if skill.tags else "",
-                _format_size(latest.total_size) if latest else "-",
             )
 
         console.print(table)
+        console.print()
 
 
 @cli.command()
 @click.argument("name")
-def versions(name: str):
+@click.option("--source", "-s", "source_name", default=None, help="Source to query")
+def versions(name: str, source_name: str | None):
     """List all versions of a skill."""
-    lib = _get_library()
-    skill = lib.info(name)
+    sm = _get_source_manager()
+    skill = sm.info(name, source=source_name)
     if skill is None:
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
 
     if not skill.versions:
-        console.print("[dim]No versions.[/dim]")
+        console.print("[dim]No published versions. Run: skillm publish {name}[/dim]")
         return
 
     table = Table(show_header=True)
     table.add_column("Version")
-    table.add_column("Files", justify="right")
-    table.add_column("Size", justify="right")
     table.add_column("Published")
 
     for v in skill.versions:
         latest_marker = " (latest)" if v == skill.versions[-1] else ""
         table.add_row(
             v.version + latest_marker,
-            str(v.file_count),
-            _format_size(v.total_size),
             v.published_at[:10] if v.published_at else "-",
         )
 
@@ -557,9 +292,9 @@ def versions(name: str):
 @cli.command()
 @click.argument("query")
 def search(query: str):
-    """Search skills in the library."""
-    lib = _get_library()
-    results = lib.search(query)
+    """Search skills across all sources."""
+    sm = _get_source_manager()
+    results = sm.search(query)
 
     if not results:
         console.print("[dim]No results.[/dim]")
@@ -569,7 +304,7 @@ def search(query: str):
         latest = skill.versions[-1] if skill.versions else None
         ver = f"@{latest.version}" if latest else ""
         tags = f" [{', '.join(skill.tags)}]" if skill.tags else ""
-        console.print(f"[bold]{skill.name}[/bold]{ver}{tags}")
+        console.print(f"[bold]{skill.name}[/bold]{ver} ({skill.source}){tags}")
         if skill.description:
             console.print(f"  {skill.description}")
 
@@ -577,20 +312,17 @@ def search(query: str):
 @cli.command("categories")
 def categories_cmd():
     """Show all categories with skill counts."""
-    lib = _get_library()
-    cats = lib.db.list_categories()
-
+    sm = _get_source_manager()
+    cats = sm.db.list_categories()
     if not cats:
-        console.print("[dim]No skills in library.[/dim]")
+        console.print("[dim]No skills found.[/dim]")
         return
 
     table = Table(show_header=True)
     table.add_column("Category", style="bold")
     table.add_column("Skills", justify="right")
-
     for cat, count in cats:
         table.add_row(cat, str(count))
-
     console.print(table)
 
 
@@ -599,8 +331,8 @@ def categories_cmd():
 @click.argument("category")
 def categorize_cmd(name: str, category: str):
     """Set the category of a skill."""
-    lib = _get_library()
-    skill = lib.info(name)
+    sm = _get_source_manager()
+    skill = sm.info(name)
     if skill is None:
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
@@ -608,8 +340,8 @@ def categorize_cmd(name: str, category: str):
     skill.category = category.strip().lower()
     from datetime import datetime, timezone
     skill.updated_at = datetime.now(timezone.utc).isoformat()
-    lib.db.update_skill(skill)
-    console.print(f"[green]{name} → {skill.category}[/green]")
+    sm.db.update_skill(skill)
+    console.print(f"[green]{name} -> {skill.category}[/green]")
 
 
 @cli.command()
@@ -617,8 +349,8 @@ def categorize_cmd(name: str, category: str):
 @click.argument("tags", nargs=-1, required=True)
 def tag(name: str, tags: tuple[str]):
     """Add tags to a skill."""
-    lib = _get_library()
-    if lib.tag(name, list(tags)):
+    sm = _get_source_manager()
+    if sm.tag(name, list(tags)):
         console.print(f"[green]Tagged {name} with: {', '.join(tags)}[/green]")
     else:
         console.print(f"[red]Skill '{name}' not found[/red]")
@@ -629,16 +361,108 @@ def tag(name: str, tags: tuple[str]):
 @click.argument("tags", nargs=-1, required=True)
 def untag(name: str, tags: tuple[str]):
     """Remove tags from a skill."""
-    lib = _get_library()
-    if lib.untag(name, list(tags)):
+    sm = _get_source_manager()
+    if sm.untag(name, list(tags)):
         console.print(f"[green]Untagged {name}: {', '.join(tags)}[/green]")
     else:
         console.print(f"[red]Skill '{name}' not found[/red]")
 
 
-# ── Project Operations ─────────────────────────────────────
+# ── Push / Pull / Log / Diff ─────────────────────────────
 
-# Common options for project commands
+@cli.command("push")
+@click.argument("source_name", required=False, default=None)
+def push_cmd(source_name: str | None):
+    """Push a source repo to its remote (git push --tags)."""
+    sm = _get_source_manager()
+    try:
+        result = sm.push(source_name)
+        src = sm.resolve_source(source_name)
+        console.print(f"[green]Pushed '{src.name}'[/green]")
+        if result:
+            console.print(f"[dim]{result}[/dim]")
+    except GitError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@cli.command("pull")
+@click.argument("source_name", required=False, default=None)
+def pull_cmd(source_name: str | None):
+    """Pull a source repo from its remote (git pull + cache rebuild)."""
+    sm = _get_source_manager()
+    try:
+        result = sm.pull(source_name)
+        src = sm.resolve_source(source_name)
+        console.print(f"[green]Pulled '{src.name}'[/green]")
+        if result:
+            console.print(f"[dim]{result}[/dim]")
+    except GitError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@cli.command("log")
+@click.argument("name")
+@click.option("--source", "-s", "source_name", default=None, help="Source to query")
+@click.option("-n", "--max-count", default=20, help="Max number of log entries")
+def log_cmd(name: str, source_name: str | None, max_count: int):
+    """Show git log for a skill."""
+    sm = _get_source_manager()
+    try:
+        output = sm.log(name, source_name=source_name, max_count=max_count)
+        if output:
+            console.print(output)
+        else:
+            console.print("[dim]No history.[/dim]")
+    except GitError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@cli.command("diff")
+@click.argument("name")
+@click.option("--source", "-s", "source_name", default=None, help="Source to query")
+def diff_cmd(name: str, source_name: str | None):
+    """Show uncommitted changes for a skill."""
+    sm = _get_source_manager()
+    try:
+        output = sm.diff(name, source_name=source_name)
+        if output:
+            console.print(output)
+        else:
+            console.print("[dim]No uncommitted changes.[/dim]")
+    except GitError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+# ── Cache Management ──────────────────────────────────────
+
+@cli.group()
+def cache():
+    """Manage the skill cache index."""
+
+
+@cache.command("rebuild")
+@click.option("--source", "-s", "source_name", default=None, help="Rebuild specific source only")
+def cache_rebuild(source_name: str | None):
+    """Rebuild the cache index from git repositories."""
+    sm = _get_source_manager()
+    count = sm.rebuild_cache(source_name=source_name)
+    console.print(f"[green]Rebuilt cache: {count} skill(s) indexed.[/green]")
+
+
+@cache.command("stats")
+def cache_stats():
+    """Show cache statistics."""
+    sm = _get_source_manager()
+    s = sm.stats()
+    console.print(
+        f"Skills: [bold]{s['skills']}[/bold] | "
+        f"Versions: [bold]{s['versions']}[/bold] | "
+        f"Sources: [bold]{s['sources']}[/bold]"
+    )
+
+
+# ── Project Operations ────────────────────────────────────
+
 _agent_option = click.option("--agent", "-a", default="claude",
     type=click.Choice(["claude", "cursor", "codex", "openclaw"]),
     help="Target agent (default: claude)")
@@ -649,17 +473,25 @@ _root_option = click.option("--project-root", "-r", default=None,
 @cli.command("install")
 @click.argument("name")
 @click.option("--pin", is_flag=True, help="Pin to this version")
+@click.option("--source", "-s", "source_name", default=None, help="Install from specific source")
 @_agent_option
 @_root_option
-def install_cmd(name: str, pin: bool, agent: str, project_root: str | None):
-    """Install a skill from the library into this project."""
+def install_cmd(name: str, pin: bool, source_name: str | None, agent: str, project_root: str | None):
+    """Install a skill from a source into this project."""
     version = None
     if "@" in name:
         name, version = name.rsplit("@", 1)
 
     project = _get_project(agent=agent, project_root=project_root)
-    ver = project.add(name, version=version, pin=pin)
-    console.print(f"[green]Installed {name}@{ver} → {project.skills_dir.relative_to(project.project_dir)}/[/green]")
+    try:
+        ver = project.add(name, version=version, pin=pin, source=source_name)
+        console.print(
+            f"[green]Installed {name}@{ver} -> "
+            f"{project.skills_dir.relative_to(project.project_dir)}/[/green]"
+        )
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        return
 
     # Run env check and warn
     from .check import check_requirements
@@ -672,7 +504,7 @@ def install_cmd(name: str, pin: bool, agent: str, project_root: str | None):
             console.print(f"[yellow]Warning: {report.failed} unmet requirement(s):[/yellow]")
             for r in report.results:
                 if not r.ok:
-                    console.print(f"  [red]✗[/red] {r.name} — {r.message}")
+                    console.print(f"  [red]x[/red] {r.name} -- {r.message}")
 
 
 @cli.command("uninstall")
@@ -706,29 +538,25 @@ def sync(agent: str, project_root: str | None):
 @_agent_option
 @_root_option
 def upgrade(name: str | None, agent: str, project_root: str | None):
-    """Update project skills to latest library versions."""
+    """Update project skills to latest versions."""
     project = _get_project(agent=agent, project_root=project_root)
     upgraded = project.upgrade(name=name)
     if upgraded:
         for skill_name, old, new in upgraded:
-            console.print(f"[green]{skill_name}: {old} → {new}[/green]")
+            console.print(f"[green]{skill_name}: {old} -> {new}[/green]")
     else:
         console.print("[dim]Everything up to date.[/dim]")
 
 
-# ── Environment Check ──────────────────────────────────────
+# ── Environment Check ─────────────────────────────────────
 
 def _print_check_report(report):
-    """Print a skill check report."""
-    from .check import SkillCheckReport
     if not report.has_checks:
         console.print(f"  [dim]No requirements declared[/dim]")
         return
-
     for r in report.results:
-        icon = "[green]✓[/green]" if r.ok else "[red]✗[/red]"
-        console.print(f"  {icon} [bold]{r.name}[/bold] — {r.message}")
-
+        icon = "[green]v[/green]" if r.ok else "[red]x[/red]"
+        console.print(f"  {icon} [bold]{r.name}[/bold] -- {r.message}")
     if report.all_ok:
         console.print(f"  [green]All {report.passed} checks passed[/green]")
     else:
@@ -744,39 +572,29 @@ def check_cmd(name: str, scan: bool):
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
-    lib = _get_library()
-    skill = lib.info(name)
+    sm = _get_source_manager()
+    skill = sm.info(name)
     if skill is None:
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
 
-    # Get latest version files to read SKILL.md
-    latest = lib.db.get_latest_version(skill.id)
-    if latest is None:
-        console.print(f"[red]No versions for '{name}'[/red]")
-        return
-
-    skill_dir = lib.get_skill_files_path(name, latest.version)
+    skill_dir = sm.get_skill_files(name)
     meta = extract_metadata(skill_dir)
-
-    # Check declared requirements
     requires = meta.requires
+
     console.print(f"[bold]{name}[/bold] environment check:")
 
     if scan:
-        # Auto-scan content and merge with declared
         detected = scan_skill_content(meta.content)
         missing = diff_requires(requires, detected)
-
         if missing.has_findings:
-            # Merge detected into requires for checking
             if not isinstance(requires, dict):
                 requires = {"bins": requires} if requires else {}
             merged = dict(requires)
             if missing.bins:
                 merged["bins"] = list(set(merged.get("bins", []) + missing.bins))
             if missing.packages:
-                merged["packages"] = list(set(merged.get("packages", []) + missing.packages))
+                merged["packages"] = list(set(merged.get("bins", []) + missing.packages))
             if missing.env:
                 merged["env"] = list(set(merged.get("env", []) + missing.env))
             requires = merged
@@ -816,7 +634,7 @@ def doctor_cmd(scan: bool, agent: str, project_root: str | None):
         return
 
     all_ok = True
-    for skill_name, info in manifest.items():
+    for skill_name, skill_info in manifest.items():
         skill_dir = project.skills_dir / skill_name
         if not skill_dir.exists():
             console.print(f"[bold]{skill_name}[/bold]: [red]not installed (run skillm sync)[/red]")
@@ -844,18 +662,6 @@ def doctor_cmd(scan: bool, agent: str, project_root: str | None):
         console.print(f"[bold]{skill_name}[/bold]:")
         report = check_requirements(skill_name, requires)
         _print_check_report(report)
-
-        if scan:
-            detected = scan_skill_content(meta.content)
-            missing_fm = diff_requires(meta.requires, detected)
-            if missing_fm.has_findings:
-                console.print("  [dim]Auto-detected (not in frontmatter):[/dim]")
-                if missing_fm.bins:
-                    console.print(f"    bins: {missing_fm.bins}")
-                if missing_fm.packages:
-                    console.print(f"    packages: {missing_fm.packages}")
-                if missing_fm.env:
-                    console.print(f"    env: {missing_fm.env}")
 
         if not report.all_ok:
             all_ok = False
@@ -906,7 +712,7 @@ def disable_cmd(name: str, agent: str, project_root: str | None):
         console.print(f"[red]Skill '{name}' not in project[/red]")
 
 
-# ── Export/Import ──────────────────────────────────────────
+# ── Export/Import ─────────────────────────────────────────
 
 @cli.command("export")
 @click.argument("name")
@@ -914,24 +720,21 @@ def disable_cmd(name: str, agent: str, project_root: str | None):
 @click.option("--output", default=None, type=click.Path(), help="Output directory")
 def export_cmd(name: str, version: str | None, output: str | None):
     """Export a skill as a .skillpack archive."""
-    lib = _get_library()
-    skill = lib.info(name)
+    sm = _get_source_manager()
+    skill = sm.info(name)
     if skill is None:
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
 
     if version is None:
-        ver = lib.db.get_latest_version(skill.id)
-        if ver is None:
-            console.print(f"[red]No versions for '{name}'[/red]")
-            return
-        version = ver.version
+        latest = sm.db.get_latest_version(skill.id)
+        version = latest.version if latest else None
 
-    skill_path = lib.get_skill_files_path(name, version)
+    skill_path = sm.get_skill_files(name, version=version)
     output_dir = Path(output) if output else Path.cwd()
 
     archive = export_skill(
-        skill_path, name, version,
+        skill_path, name, version or "HEAD",
         {"description": skill.description, "author": skill.author, "tags": skill.tags},
         output_dir=output_dir,
     )
@@ -939,11 +742,12 @@ def export_cmd(name: str, version: str | None, output: str | None):
 
 
 @cli.command("import")
-@click.argument("source")
+@click.argument("import_source")
 @click.option("--name", default=None, help="Override skill name")
+@click.option("--source", "-s", "source_name", default=None, help="Target source")
 @click.option("--ref", default=None, help="Git ref for GitHub imports (tag, branch)")
 @click.option("--token", default=None, help="Auth token (GitHub or ClawHub)")
-def import_cmd(source: str, name: str | None, ref: str | None, token: str | None):
+def import_cmd(import_source: str, name: str | None, source_name: str | None, ref: str | None, token: str | None):
     """Import a skill from various sources.
 
     \b
@@ -951,11 +755,10 @@ def import_cmd(source: str, name: str | None, ref: str | None, token: str | None
       ./path/to/dir          Local directory
       ./skill.skillpack      Skillpack archive
       owner/repo             GitHub repository
-      owner/repo/subpath     GitHub subdirectory
       clawhub:slug           ClawHub registry
-      clawhub:slug@1.0.0     ClawHub specific version
       https://url/skill.zip  URL (tar.gz or zip)
     """
+    import httpx
     from .importers import (
         detect_source_type,
         import_from_clawhub,
@@ -963,54 +766,68 @@ def import_cmd(source: str, name: str | None, ref: str | None, token: str | None
         import_from_url,
     )
 
-    lib = _get_library()
+    sm = _get_source_manager()
 
     try:
-        source_type = detect_source_type(source)
+        source_type = detect_source_type(import_source)
     except ValueError as e:
         console.print(f"[red]{e}[/red]")
         return
 
     try:
         if source_type == "skillpack":
-            files_dir, metadata = import_skillpack(Path(source))
+            files_dir, metadata = import_skillpack(Path(import_source))
             skill_name = name or metadata["name"]
-            version = metadata.get("version", "v1")
-            lib.publish(files_dir, name=skill_name, version=version, source=source)
+            sm.add_skill(files_dir, source_name=source_name, name=skill_name)
             shutil.rmtree(files_dir.parent)
-            console.print(f"[green]Imported {skill_name}@{version} from {Path(source).name}[/green]")
+            console.print(f"[green]Imported {skill_name} from {Path(import_source).name}[/green]")
 
         elif source_type == "directory":
-            skill_name, ver = lib.publish(Path(source), name=name)
-            console.print(f"[green]Imported {skill_name}@{ver}[/green]")
+            skill_name, src_name = sm.add_skill(Path(import_source), source_name=source_name, name=name)
+            console.print(f"[green]Imported {skill_name} to source '{src_name}'[/green]")
 
         elif source_type == "github":
-            console.print(f"[dim]Fetching from GitHub: {source}...[/dim]")
-            skill_dir, source_str = import_from_github(source, ref=ref, token=token)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            console.print(f"[dim]Fetching from GitHub: {import_source}...[/dim]")
+            skill_dir, source_str = import_from_github(import_source, ref=ref, token=token)
+            skill_name, src_name = sm.add_skill(skill_dir, source_name=source_name, name=name)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-gh-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from GitHub ({source_str})[/green]")
+            console.print(f"[green]Imported {skill_name} from GitHub ({source_str})[/green]")
 
         elif source_type == "clawhub":
-            console.print(f"[dim]Fetching from ClawHub: {source}...[/dim]")
-            skill_dir, source_str = import_from_clawhub(source, token=token)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            console.print(f"[dim]Fetching from ClawHub: {import_source}...[/dim]")
+            skill_dir, source_str = import_from_clawhub(import_source, token=token)
+            skill_name, src_name = sm.add_skill(skill_dir, source_name=source_name, name=name)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-ch-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from ClawHub ({source_str})[/green]")
+            console.print(f"[green]Imported {skill_name} from ClawHub ({source_str})[/green]")
 
         elif source_type == "url":
-            console.print(f"[dim]Downloading: {source}...[/dim]")
-            skill_dir, source_str = import_from_url(source)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            console.print(f"[dim]Downloading: {import_source}...[/dim]")
+            skill_dir, source_str = import_from_url(import_source)
+            skill_name, src_name = sm.add_skill(skill_dir, source_name=source_name, name=name)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-url-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from URL[/green]")
+            console.print(f"[green]Imported {skill_name} from URL[/green]")
 
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")
     except httpx.HTTPStatusError as e:
-        console.print(f"[red]HTTP error: {e.response.status_code} — {e.request.url}[/red]")
+        console.print(f"[red]HTTP error: {e.response.status_code} -- {e.request.url}[/red]")
     except Exception as e:
         console.print(f"[red]Import failed: {e}[/red]")
+
+
+# ── Migration ─────────────────────────────────────────────
+
+@cli.command("migrate")
+def migrate_cmd():
+    """Migrate from skillm v1 config to v2 (sources.toml)."""
+    from .config import migrate_config
+    result = migrate_config()
+    if result:
+        console.print("[green]Migrated to sources.toml format.[/green]")
+        for src in result.sources:
+            console.print(f"  Source: {src.name} -> {src.url}")
+    else:
+        console.print("[dim]Nothing to migrate (already on v2 or no v1 config found).[/dim]")
 
 
 if __name__ == "__main__":

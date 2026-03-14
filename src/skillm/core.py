@@ -1,4 +1,4 @@
-"""Core business logic for skillm."""
+"""Core business logic for skillm v2 — git-backed package manager."""
 
 from __future__ import annotations
 
@@ -8,273 +8,254 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .backends.base import LibraryBackend
-from .backends.local import LocalBackend
-from .backends.ssh import SSHBackend
-from .config import Config, load_config, save_config
+from .config import Config, Source, load_config, save_config
 from .db import Database
+from .git import GitError, GitRepo
+from .lockfile import LockFile, _dir_integrity
 from .metadata import extract_metadata
-from .models import FileRecord, Skill, Version
-from .remote import Remote, load_remotes
-from .snapshot import create_snapshot
+from .models import Skill, Version
 
 SKILLS_JSON = "skills.json"
-SKILLS_DIR = ".skills"
-
-import re
-
-_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)$")
+LOCK_FILENAME = "skills.lock"
 
 
-def _next_version(existing: list, major: bool = False) -> str:
-    """Compute the next version string from existing versions.
-
-    Parses vMAJOR.MINOR format. If major=True, bumps major and resets minor.
-    Otherwise bumps minor of the latest major.
-
-    Falls back to v0.1 if no existing versions or unparseable.
-    """
-    if not existing:
-        return "v1.0" if major else "v0.1"
-
-    # Parse all version strings
-    max_major = 0
-    max_minor = 0
-    for v in existing:
-        m = _VERSION_RE.match(v.version)
-        if m:
-            maj, minor = int(m.group(1)), int(m.group(2))
-            if maj > max_major or (maj == max_major and minor > max_minor):
-                max_major = maj
-                max_minor = minor
-
-    if major:
-        return f"v{max_major + 1}.0"
-    else:
-        return f"v{max_major}.{max_minor + 1}"
-
-
-def create_library_from_remote(remote: Remote) -> "Library":
-    """Create a Library instance from a Remote."""
-    config = Config()
-    if remote.is_ssh:
-        config.library.backend = "ssh"
-        host, path = remote.parse_ssh()
-        config.library.host = host
-        config.library.path = path
-    else:
-        config.library.backend = "local"
-        config.library.path = remote.path
-    return Library(config)
-
-
-def get_active_library() -> "Library":
-    """Create a Library from the currently active remote."""
-    remotes = load_remotes()
-    active = remotes.get_active()
-    if active is None:
-        return Library()
-    return create_library_from_remote(active)
-
-
-class Library:
-    """Core library operations."""
+class SourceManager:
+    """Manages multiple skill sources (git repos) and the cache index."""
 
     def __init__(self, config: Config | None = None):
         self.config = config or load_config()
-        self.backend = self._create_backend()
-        self.db = Database(self.backend.get_db())
+        self.db = Database(self.config.cache_path / "index.db")
         self.db.initialize()
+        self._sync_sources_to_cache()
 
-    def _create_backend(self) -> LibraryBackend:
-        if self.config.library.backend == "local":
-            return LocalBackend(self.config.library_path)
-        if self.config.library.backend == "file":
-            return LocalBackend(Path(self.config.library.path).expanduser())
-        if self.config.library.backend == "ssh":
-            return SSHBackend(self.config.library.host, self.config.library.path)
-        raise ValueError(f"Unknown backend: {self.config.library.backend}")
+    def _sync_sources_to_cache(self) -> None:
+        """Ensure all configured sources are in the cache DB."""
+        for src in self.config.sources:
+            self.db.upsert_source(src.name, src.url, src.priority)
 
-    def _snapshot(self) -> None:
-        """Create a DB snapshot before write operations."""
-        create_snapshot(self.config.library_path)
+    # ── Source lifecycle ─────────────────────────────────────
 
-    def init(self) -> None:
-        """Initialize a new library."""
-        self.backend.initialize()
-        self.db = Database(self.backend.get_db())
-        self.db.initialize()
+    def init_source(self, name: str, url: str, priority: int = 10) -> Source:
+        """Initialize a new source (create git repo if local)."""
+        source = Source(name=name, url=url, priority=priority)
+        path = source.resolved_path
+        repo = GitRepo(path)
+        if not repo.is_repo():
+            repo.init()
+            # Create a .gitkeep so we have an initial commit
+            (path / ".gitkeep").write_text("")
+            repo.add(".gitkeep")
+            repo.commit("skillm: initialize source")
+
+        # Add to config
+        existing = self.config.get_source(name)
+        if existing is None:
+            self.config.sources.append(source)
+            self.config.sources.sort(key=lambda s: s.priority)
+        else:
+            existing.url = url
+            existing.priority = priority
+
+        if not self.config.settings.default_source:
+            self.config.settings.default_source = name
+
         save_config(self.config)
+        self.db.upsert_source(name, url, priority)
+        return source
+
+    def add_source(self, name: str, url: str, priority: int = 10) -> Source:
+        """Add an existing source (git repo must already exist)."""
+        source = Source(name=name, url=url, priority=priority)
+
+        existing = self.config.get_source(name)
+        if existing is None:
+            self.config.sources.append(source)
+            self.config.sources.sort(key=lambda s: s.priority)
+        else:
+            existing.url = url
+            existing.priority = priority
+
+        if not self.config.settings.default_source:
+            self.config.settings.default_source = name
+
+        save_config(self.config)
+        self.db.upsert_source(name, url, priority)
+        return source
+
+    def remove_source(self, name: str) -> bool:
+        """Remove a source from config (does not delete the git repo)."""
+        self.config.sources = [s for s in self.config.sources if s.name != name]
+        if self.config.settings.default_source == name:
+            if self.config.sources:
+                self.config.settings.default_source = self.config.sources[0].name
+            else:
+                self.config.settings.default_source = ""
+        save_config(self.config)
+        self.db.delete_skills_by_source(name)
+        return True
+
+    def set_default(self, name: str) -> None:
+        """Set the default source."""
+        if self.config.get_source(name) is None:
+            raise ValueError(f"Source '{name}' not found")
+        self.config.settings.default_source = name
+        save_config(self.config)
+
+    def get_repo(self, source_name: str) -> GitRepo:
+        """Get a GitRepo for a source."""
+        src = self.config.get_source(source_name)
+        if src is None:
+            raise ValueError(f"Source '{source_name}' not found")
+        return GitRepo(src.resolved_path)
+
+    def resolve_source(self, name: str | None = None) -> Source:
+        """Resolve a source by name, or return the default."""
+        if name:
+            src = self.config.get_source(name)
+            if src is None:
+                raise ValueError(f"Source '{name}' not found")
+            return src
+        src = self.config.get_default_source()
+        if src is None:
+            raise ValueError("No sources configured. Run: skillm source init NAME PATH")
+        return src
+
+    # ── Skill operations ─────────────────────────────────────
+
+    def add_skill(
+        self,
+        source_dir: Path,
+        source_name: str | None = None,
+        name: str | None = None,
+        message: str | None = None,
+    ) -> tuple[str, str]:
+        """Add a skill directory to a source repo.
+
+        1. Extract metadata from SKILL.md
+        2. Copy files to <source-repo>/<skill-name>/
+        3. git add + git commit
+        4. Update cache
+
+        Returns (skill_name, source_name).
+        """
+        source_dir = source_dir.resolve()
+        meta = extract_metadata(source_dir, name_override=name)
+        skill_name = meta.name
+
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
+
+        # Copy files into the source repo
+        dest = src.resolved_path / skill_name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source_dir, dest)
+
+        # Git add + commit
+        repo.add(skill_name)
+        commit_msg = message or f"skillm: add {skill_name}"
+        commit = repo.commit(commit_msg)
+
+        # Update cache
+        self._cache_skill(src.name, skill_name, meta, commit)
+
+        return skill_name, src.name
 
     def publish(
         self,
-        source_dir: Path,
-        name: str | None = None,
-        version: str | None = None,
-        source: str | None = None,
+        skill_name: str,
+        source_name: str | None = None,
         major: bool = False,
+        message: str | None = None,
     ) -> tuple[str, str]:
-        """Publish a skill directory to the library. Returns (name, version)."""
-        self._snapshot()
-        source_dir = source_dir.resolve()
-        meta = extract_metadata(source_dir, name_override=name)
-        skill_name = meta.name
-        skill_source = source or meta.source or ""
+        """Create a version tag for a skill.
 
-        now = datetime.now(timezone.utc).isoformat()
+        1. Find existing tags for this skill
+        2. Compute next version
+        3. Create git tag
 
-        # Get or create skill record
-        skill = self.db.get_skill(skill_name)
-        if skill is None:
-            skill_id = self.db.insert_skill(Skill(
-                name=skill_name,
-                description=meta.description,
-                category=meta.category,
-                author=meta.author,
-                source=skill_source,
-                created_at=now,
-                updated_at=now,
-            ))
-            skill = self.db.get_skill(skill_name)
-        else:
-            skill.description = meta.description
-            skill.category = meta.category or skill.category
-            skill.author = meta.author
-            skill.source = skill_source or skill.source
-            skill.updated_at = now
-            self.db.update_skill(skill)
-            skill_id = skill.id
-
-        # Determine version
-        if version is None:
-            existing = self.db.get_versions(skill_id)
-            version = _next_version(existing, major=major)
-
-        # Collect file info
-        files = list(source_dir.rglob("*"))
-        files = [f for f in files if f.is_file()]
-        total_size = sum(f.stat().st_size for f in files)
-
-        # Create version record
-        ver_id = self.db.insert_version(Version(
-            skill_id=skill_id,
-            version=version,
-            file_count=len(files),
-            total_size=total_size,
-            published_at=now,
-        ))
-
-        # Record individual files
-        for f in files:
-            rel = f.relative_to(source_dir)
-            file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-            self.db.insert_file(FileRecord(
-                version_id=ver_id,
-                rel_path=str(rel),
-                size=f.stat().st_size,
-                sha256=file_hash,
-            ))
-
-        # Store files via backend
-        self.backend.put_skill_files(skill_name, version, source_dir)
-
-        # Update tags and search content
-        if meta.tags:
-            self.db.set_tags(skill_id, meta.tags)
-        self.db.update_search_content(skill_id, meta.content)
-
-        return skill_name, version
-
-    def override(self, source_dir: Path, name: str | None = None) -> tuple[str, str]:
-        """Override the latest version of an existing skill. Returns (name, version).
-
-        Raises ValueError if skill does not exist or has no versions.
+        Returns (skill_name, version).
         """
-        self._snapshot()
-        source_dir = source_dir.resolve()
-        meta = extract_metadata(source_dir, name_override=name)
-        skill_name = meta.name
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
 
-        skill = self.db.get_skill(skill_name)
-        if skill is None:
-            raise ValueError(f"Skill '{skill_name}' not found in library")
+        # Verify skill exists in repo
+        skill_dir = src.resolved_path / skill_name
+        if not skill_dir.exists():
+            raise ValueError(f"Skill '{skill_name}' not found in source '{src.name}'")
 
-        latest = self.db.get_latest_version(skill.id)
-        if latest is None:
-            raise ValueError(f"No versions found for '{skill_name}'")
+        # Auto-commit any uncommitted changes first
+        if repo.has_changes(skill_name):
+            repo.add(skill_name)
+            repo.commit(message or f"skillm: update {skill_name}")
 
-        version = latest.version
+        version = repo.next_version(skill_name, major=major)
+        tag_name = f"{skill_name}/{version}"
+        tag_msg = message or f"skillm: publish {skill_name} {version}"
+        repo.tag(tag_name, tag_msg)
 
-        # Remove old version data (cascades to files table)
-        self.db.delete_version(skill.id, version)
-        self.backend.remove_skill_files(skill_name, version)
-
+        # Update cache with version info
         now = datetime.now(timezone.utc).isoformat()
-
-        # Update skill metadata
-        skill.description = meta.description
-        skill.category = meta.category or skill.category
-        skill.author = meta.author
-        skill.updated_at = now
-        self.db.update_skill(skill)
-
-        # Collect file info
-        files = list(source_dir.rglob("*"))
-        files = [f for f in files if f.is_file()]
-        total_size = sum(f.stat().st_size for f in files)
-
-        # Re-create version record with same version string
-        ver_id = self.db.insert_version(Version(
-            skill_id=skill.id,
-            version=version,
-            file_count=len(files),
-            total_size=total_size,
-            published_at=now,
-        ))
-
-        for f in files:
-            rel = f.relative_to(source_dir)
-            file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-            self.db.insert_file(FileRecord(
-                version_id=ver_id,
-                rel_path=str(rel),
-                size=f.stat().st_size,
-                sha256=file_hash,
+        skill = self.db.get_skill(skill_name, source=src.name)
+        if skill:
+            commit = repo.tag_commit(tag_name)
+            self.db.insert_version(Version(
+                skill_id=skill.id,
+                version=version,
+                published_at=now,
             ))
-
-        self.backend.put_skill_files(skill_name, version, source_dir)
-
-        if meta.tags:
-            self.db.set_tags(skill.id, meta.tags)
-        self.db.update_search_content(skill.id, meta.content)
 
         return skill_name, version
 
-    def remove(self, name: str, version: str | None = None) -> bool:
-        """Remove a skill (or specific version) from the library."""
-        self._snapshot()
-        skill = self.db.get_skill(name)
-        if skill is None:
-            return False
+    def remove_skill(
+        self,
+        skill_name: str,
+        source_name: str | None = None,
+        version: str | None = None,
+        message: str | None = None,
+    ) -> bool:
+        """Remove a skill or version from a source.
+
+        If version is specified, only removes that version tag.
+        Otherwise removes the skill directory and all tags.
+        """
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
 
         if version:
-            self.db.delete_version(skill.id, version)
-            self.backend.remove_skill_files(name, version)
-            # If no versions remain, remove the skill entirely
-            remaining = self.db.get_versions(skill.id)
-            if not remaining:
-                self.db.delete_skill(name)
-        else:
-            self.db.delete_skill(name)
-            self.backend.remove_skill_files(name)
+            # Just remove the version tag
+            tag_name = f"{skill_name}/{version}"
+            if repo.tag_exists(tag_name):
+                repo.delete_tag(tag_name)
+            skill = self.db.get_skill(skill_name, source=src.name)
+            if skill:
+                self.db.delete_version(skill.id, version)
+                remaining = self.db.get_versions(skill.id)
+                if not remaining:
+                    self.db.delete_skill(skill_name, source=src.name)
+            return True
 
+        # Remove entire skill directory
+        skill_dir = src.resolved_path / skill_name
+        if skill_dir.exists():
+            shutil.rmtree(skill_dir)
+            repo.add("-A")
+            repo.commit(message or f"skillm: remove {skill_name}")
+
+        # Remove all version tags
+        for tag_name, _, _ in repo.skill_versions(skill_name):
+            repo.delete_tag(tag_name)
+
+        self.db.delete_skill(skill_name, source=src.name)
         return True
 
-    def info(self, name: str) -> Skill | None:
-        return self.db.get_skill(name)
+    # ── Query operations ─────────────────────────────────────
 
-    def list_skills(self) -> list[Skill]:
-        return self.db.list_skills()
+    def info(self, name: str, source: str | None = None) -> Skill | None:
+        return self.db.get_skill(name, source=source)
+
+    def list_skills(self, source: str | None = None) -> list[Skill]:
+        return self.db.list_skills(source=source)
 
     def search(self, query: str) -> list[Skill]:
         return self.db.search(query)
@@ -297,107 +278,164 @@ class Library:
         return {
             "skills": self.db.skill_count(),
             "versions": self.db.version_count(),
-            "total_size": self.db.total_size(),
-            "backend": self.config.library.backend,
-            "path": str(self.config.library_path),
+            "sources": len(self.config.sources),
+            "cache_path": str(self.config.cache_path),
         }
 
-    def rebuild(self) -> int:
-        """Rebuild database from skill files on disk."""
-        self.db.initialize()
+    # ── Git operations ───────────────────────────────────────
 
-        # Clear existing data
-        self.db.conn.execute("DELETE FROM files")
-        self.db.conn.execute("DELETE FROM versions")
-        self.db.conn.execute("DELETE FROM tags")
-        self.db.conn.execute("DELETE FROM skills")
-        self.db.conn.commit()
+    def push(self, source_name: str | None = None) -> str:
+        """Push a source repo to its remote."""
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
+        if not repo.has_remote():
+            raise GitError(f"Source '{src.name}' has no remote configured")
+        return repo.push()
+
+    def pull(self, source_name: str | None = None) -> str:
+        """Pull a source repo from its remote."""
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
+        if not repo.has_remote():
+            raise GitError(f"Source '{src.name}' has no remote configured")
+        result = repo.pull()
+        self.rebuild_cache(source_name=src.name)
+        return result
+
+    def log(self, skill_name: str, source_name: str | None = None, max_count: int = 20) -> str:
+        """Get git log for a skill."""
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
+        return repo.log(path=skill_name, max_count=max_count)
+
+    def diff(self, skill_name: str, source_name: str | None = None) -> str:
+        """Get uncommitted changes for a skill."""
+        src = self.resolve_source(source_name)
+        repo = GitRepo(src.resolved_path)
+        return repo.diff(path=skill_name)
+
+    # ── Cache operations ─────────────────────────────────────
+
+    def rebuild_cache(self, source_name: str | None = None) -> int:
+        """Rebuild the cache index from git repos.
+
+        If source_name is given, only rebuild that source.
+        Returns count of skills indexed.
+        """
+        sources = [self.config.get_source(source_name)] if source_name else self.config.sources
+        sources = [s for s in sources if s is not None]
 
         count = 0
-        for name, versions in self.backend.list_skill_dirs():
-            for ver in versions:
+        for src in sources:
+            self.db.delete_skills_by_source(src.name)
+            repo = GitRepo(src.resolved_path)
+            if not repo.is_repo():
+                continue
+
+            # Scan skill directories
+            skill_names = repo.list_skill_dirs()
+            for name in skill_names:
                 try:
-                    skill_dir = self.backend.get_skill_files(name, ver)
-                    meta = extract_metadata(skill_dir)
+                    skill_dir = src.resolved_path / name
+                    meta = extract_metadata(skill_dir, name_override=name)
                     now = datetime.now(timezone.utc).isoformat()
 
-                    skill = self.db.get_skill(name)
-                    if skill is None:
-                        skill_id = self.db.insert_skill(Skill(
-                            name=name, description=meta.description,
-                            category=meta.category, author=meta.author,
-                            created_at=now, updated_at=now,
-                        ))
-                    else:
-                        skill_id = skill.id
+                    try:
+                        commit = repo.head_commit()
+                    except GitError:
+                        commit = ""
 
-                    files = [f for f in skill_dir.rglob("*") if f.is_file()]
-                    total_size = sum(f.stat().st_size for f in files)
-
-                    ver_id = self.db.insert_version(Version(
-                        skill_id=skill_id, version=ver, file_count=len(files),
-                        total_size=total_size, published_at=now,
+                    skill_id = self.db.insert_skill(Skill(
+                        name=name,
+                        source=src.name,
+                        description=meta.description,
+                        category=meta.category,
+                        author=meta.author,
+                        updated_at=now,
                     ))
-
-                    for f in files:
-                        rel = f.relative_to(skill_dir)
-                        file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-                        self.db.insert_file(FileRecord(
-                            version_id=ver_id, rel_path=str(rel),
-                            size=f.stat().st_size, sha256=file_hash,
-                        ))
 
                     if meta.tags:
                         self.db.set_tags(skill_id, meta.tags)
-                    self.db.update_search_content(skill_id, meta.content)
+
+                    # Index version tags
+                    for tag_name, major, minor in repo.skill_versions(name):
+                        version_str = f"v{major}.{minor}"
+                        try:
+                            tag_commit = repo.tag_commit(tag_name)
+                        except GitError:
+                            tag_commit = ""
+                        self.db.insert_version(Version(
+                            skill_id=skill_id,
+                            version=version_str,
+                            published_at=now,
+                        ))
 
                     count += 1
                 except Exception:
                     continue
 
+            now = datetime.now(timezone.utc).isoformat()
+            self.db.update_source_synced(src.name, now)
+
         return count
 
-    def get_skill_files_path(self, name: str, version: str) -> Path:
-        """Get path to skill files in the library."""
-        return self.backend.get_skill_files(name, version)
+    def _cache_skill(self, source_name: str, skill_name: str, meta, commit: str) -> None:
+        """Update cache for a single skill."""
+        now = datetime.now(timezone.utc).isoformat()
 
-    def push(self, target: "Library") -> list[tuple[str, str, str]]:
-        """Push latest version of each local skill to target library.
+        skill = self.db.get_skill(skill_name, source=source_name)
+        if skill is None:
+            skill_id = self.db.insert_skill(Skill(
+                name=skill_name,
+                source=source_name,
+                description=meta.description,
+                category=meta.category,
+                author=meta.author,
+                updated_at=now,
+            ))
+        else:
+            skill.description = meta.description
+            skill.category = meta.category or skill.category
+            skill.author = meta.author or skill.author
+            skill.updated_at = now
+            self.db.update_skill(skill)
+            skill_id = skill.id
 
-        For each skill in self, takes the latest version's files and
-        publishes them to target. Version numbers are determined by
-        the target library's own history.
+        if meta.tags:
+            self.db.set_tags(skill_id, meta.tags)
 
-        Returns list of (name, local_version, target_version).
+    # ── Install operations ───────────────────────────────────
+
+    def get_skill_files(
+        self,
+        skill_name: str,
+        version: str | None = None,
+        source_name: str | None = None,
+    ) -> Path:
+        """Get the path to skill files in a source repo.
+
+        If version is specified, extracts files at that version's tag to a temp dir.
+        Otherwise returns the working tree path.
         """
-        results = []
-        for skill in self.list_skills():
-            latest = self.db.get_latest_version(skill.id)
-            if latest is None:
-                continue
-            src_dir = self.get_skill_files_path(skill.name, latest.version)
-            _, target_ver = target.publish(src_dir, name=skill.name)
-            results.append((skill.name, latest.version, target_ver))
-        return results
+        src = self.resolve_source(source_name)
 
-    def pull(self, source: "Library") -> list[tuple[str, str, str]]:
-        """Pull latest version of each skill from source library.
+        if version:
+            repo = GitRepo(src.resolved_path)
+            tag_name = f"{skill_name}/{version}"
+            if not repo.tag_exists(tag_name):
+                raise ValueError(f"Version '{version}' not found for '{skill_name}'")
+            # Extract to a temporary location in the cache
+            extract_dir = self.config.cache_path / "extract" / skill_name / version
+            if extract_dir.exists():
+                shutil.rmtree(extract_dir)
+            repo.extract_to(tag_name, f"{skill_name}/", extract_dir)
+            return extract_dir
 
-        For each skill in source, takes the latest version's files and
-        publishes them to self. Version numbers are determined by
-        self's own history.
-
-        Returns list of (name, source_version, local_version).
-        """
-        results = []
-        for skill in source.list_skills():
-            latest = source.db.get_latest_version(skill.id)
-            if latest is None:
-                continue
-            src_dir = source.get_skill_files_path(skill.name, latest.version)
-            _, local_ver = self.publish(src_dir, name=skill.name)
-            results.append((skill.name, latest.version, local_ver))
-        return results
+        # Working tree path
+        skill_dir = src.resolved_path / skill_name
+        if not skill_dir.exists():
+            raise FileNotFoundError(f"Skill '{skill_name}' not found in source '{src.name}'")
+        return skill_dir
 
 
 # Agent config directory mappings
@@ -416,28 +454,28 @@ class Project:
     Skills are installed into agent-specific directories:
       .claude/skills/my-skill/
       .cursor/skills/my-skill/
-      .codex/skills/my-skill/
 
-    The manifest (skills.json) lives in the agent directory.
+    Uses skills.json for manifest and skills.lock for integrity.
     """
 
     def __init__(
         self,
         project_dir: Path | None = None,
-        library: Library | None = None,
+        source_manager: SourceManager | None = None,
         agent: str = DEFAULT_AGENT,
     ):
         self.project_dir = (project_dir or Path.cwd()).resolve()
-        self.library = library or Library()
+        self.source_manager = source_manager or SourceManager()
         self.agent = agent
 
         agent_dir_name = AGENT_DIRS.get(agent, f".{agent}")
         self.agent_dir = self.project_dir / agent_dir_name
         self.skills_dir = self.agent_dir / "skills"
         self.skills_json = self.agent_dir / SKILLS_JSON
+        self.lock_file_path = self.agent_dir / LOCK_FILENAME
+        self._lock = LockFile(self.lock_file_path)
 
     def _ensure_dirs(self) -> None:
-        """Create agent and skills directories if they don't exist."""
         self.agent_dir.mkdir(exist_ok=True)
         self.skills_dir.mkdir(exist_ok=True)
         if not self.skills_json.exists():
@@ -455,39 +493,57 @@ class Project:
     def _save_manifest(self, manifest: dict) -> None:
         self.skills_json.write_text(json.dumps(manifest, indent=2) + "\n")
 
-    def add(self, name: str, version: str | None = None, pin: bool = False) -> str:
-        """Add a skill from library to project. Returns installed version."""
+    def add(self, name: str, version: str | None = None, pin: bool = False, source: str | None = None) -> str:
+        """Install a skill from a source into this project. Returns installed version."""
         self._ensure_dirs()
-        skill = self.library.info(name)
+        sm = self.source_manager
+        src = sm.resolve_source(source)
+
+        skill = sm.info(name, source=src.name)
         if skill is None:
-            raise ValueError(f"Skill '{name}' not found in library")
+            # Try to find it by scanning the repo
+            sm.rebuild_cache(source_name=src.name)
+            skill = sm.info(name, source=src.name)
+            if skill is None:
+                raise ValueError(f"Skill '{name}' not found in source '{src.name}'")
 
         if version is None or version == "latest":
-            ver = self.library.db.get_latest_version(skill.id)
-            if ver is None:
-                raise ValueError(f"No versions found for '{name}'")
-            version = ver.version
-        else:
-            ver = self.library.db.get_version(skill.id, version)
-            if ver is None:
-                raise ValueError(f"Version '{version}' not found for '{name}'")
+            latest = sm.db.get_latest_version(skill.id)
+            if latest:
+                version = latest.version
+            else:
+                version = None  # No published version, use HEAD
 
-        # Copy files from library to project
-        src = self.library.get_skill_files_path(name, version)
+        # Get skill files
+        src_path = sm.get_skill_files(name, version=version, source_name=src.name)
+
+        # Copy to project
         dest = self.skills_dir / name
         if dest.exists():
             shutil.rmtree(dest)
-        shutil.copytree(src, dest)
+        shutil.copytree(src_path, dest)
 
         # Update manifest
         manifest = self._load_manifest()
         manifest["skills"][name] = {
-            "version": version,
+            "version": version or "HEAD",
+            "source": src.name,
             "pinned": pin,
         }
         self._save_manifest(manifest)
 
-        return version
+        # Update lock file
+        self._lock.load()
+        repo = sm.get_repo(src.name)
+        try:
+            commit = repo.tag_commit(f"{name}/{version}") if version else repo.head_commit()
+        except GitError:
+            commit = ""
+        integrity = _dir_integrity(dest)
+        self._lock.set(name, version or "HEAD", src.name, commit=commit, integrity=integrity)
+        self._lock.save()
+
+        return version or "HEAD"
 
     def drop(self, name: str) -> bool:
         """Remove a skill from the project."""
@@ -502,10 +558,14 @@ class Project:
         if dest.exists():
             shutil.rmtree(dest)
 
+        self._lock.load()
+        self._lock.remove(name)
+        self._lock.save()
+
         return True
 
     def sync(self) -> list[str]:
-        """Install missing skills from skills.json. Returns list of synced skill names."""
+        """Install missing skills from skills.json."""
         manifest = self._load_manifest()
         synced = []
 
@@ -513,7 +573,10 @@ class Project:
             dest = self.skills_dir / name
             if not dest.exists():
                 version = info.get("version")
-                self.add(name, version=version, pin=info.get("pinned", False))
+                source = info.get("source")
+                if version == "HEAD":
+                    version = None
+                self.add(name, version=version, pin=info.get("pinned", False), source=source)
                 synced.append(name)
 
         return synced
@@ -534,15 +597,19 @@ class Project:
                 continue
 
             old_version = info["version"]
-            skill = self.library.info(skill_name)
+            source = info.get("source")
+            sm = self.source_manager
+            src = sm.resolve_source(source)
+
+            skill = sm.info(skill_name, source=src.name)
             if skill is None:
                 continue
 
-            latest = self.library.db.get_latest_version(skill.id)
+            latest = sm.db.get_latest_version(skill.id)
             if latest is None or latest.version == old_version:
                 continue
 
-            self.add(skill_name, version=latest.version, pin=info.get("pinned", False))
+            self.add(skill_name, version=latest.version, pin=False, source=src.name)
             upgraded.append((skill_name, old_version, latest.version))
 
         return upgraded
@@ -566,3 +633,14 @@ class Project:
         manifest["skills"][name]["enabled"] = False
         self._save_manifest(manifest)
         return True
+
+    def verify(self) -> list[tuple[str, bool]]:
+        """Verify installed skills match lock file. Returns list of (name, ok)."""
+        self._lock.load()
+        results = []
+        manifest = self._load_manifest()
+        for name in manifest.get("skills", {}):
+            dest = self.skills_dir / name
+            ok = self._lock.verify(name, dest)
+            results.append((name, ok))
+        return results

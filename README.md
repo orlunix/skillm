@@ -1,69 +1,41 @@
 # skillm
 
-Local-first, offline-capable skill manager for AI coding agents.
+Git-backed skill manager for AI coding agents.
 
-Manage a library of reusable skills (instructions, tools, prompts) that any coding agent — Claude Code, Cursor, Codex, OpenClaw — can consume. Think **npm for AI skills**, but your library lives on your machine.
+Manage reusable skills (instructions, tools, prompts) for Claude Code, Cursor, Codex, or OpenClaw. Skills live in git repos. skillm wraps git — you never touch it directly. Think **npm for AI skills**, backed by git.
 
 ## Why skillm
 
-- **No internet required** — skills are stored locally, not fetched on-demand
-- **You own your library** — not dependent on any platform being up
-- **Version everything** — every `add` creates a new version (v0.1, v0.2, ...), safe rollback anytime
-- **Push/pull sharing** — sync skills with team libraries via `push` and `pull`, just like git
-- **Agent-agnostic** — works with Claude Code, Cursor, Codex, OpenClaw, or any markdown-based agent
-- **Team-safe** — SSH remotes use file locking, DB snapshots protect against mistakes
+- **Git is the backend** — versioning, history, sync, and diff come free
+- **Multi-source** — pull skills from team repos, personal repos, and remote servers
+- **Version = git tag** — `my-skill/v1.0`, `my-skill/v1.1`, etc.
+- **Lock files** — `skills.lock` pins exact versions and integrity hashes
+- **Agent-agnostic** — works with Claude Code, Cursor, Codex, OpenClaw
+- **Cache is disposable** — SQLite index rebuilt from git in seconds
 
 ## Install
-
-### Standalone binary (recommended for teams)
-
-```bash
-./package.sh                              # build only → dist/skillm
-./package.sh --install                    # build + install to /usr/local/bin
-./package.sh --install-to /home/prgn_share/bin  # build + install to shared path
-```
-
-The script creates its own build venv, builds a standalone binary (~14MB), and verifies it. No Python needed on target machines — just copy the binary.
-
-### From source (development)
 
 ```bash
 pip install -e .
 ```
 
-Requires Python 3.10+.
+Requires Python 3.10+ and git.
 
 ## Quick Start
 
-### 1. Pull skills and install
+### 1. Set up a source
+
+A source is a git repo that holds skills. Each skill is a subdirectory with a `SKILL.md`.
 
 ```bash
-# One-time setup: point to the team library
-skillm remote add team /home/prgn_share/skillm
+# Initialize a new source (creates a git repo)
+skillm source init infra /home/prgn_share/skills/infra
 
-# Pull skills to your local library
-skillm pull
-# Pulled 5 skills from team (5 new)
-
-# Install into your project
-cd your-project/
-skillm install my-skill
-# Installed my-skill@v0.1 → .claude/skills/
+# Or add an existing git repo as a source
+skillm source add team ssh://git@server:/opt/skills/team.git
 ```
 
-That's it. The local library is auto-created on first use. `pull` defaults to the configured remote. `install` auto-creates the agent directory.
-
-```bash
-# Other useful commands
-skillm list                                  # browse available skills
-skillm search "pytest"                       # search by keyword
-skillm install my-skill --agent cursor       # install for a different agent
-skillm upgrade                               # update all project skills
-```
-
-### 2. Manage your local library
-
-Create a skill — just a directory with a `SKILL.md`:
+### 2. Create and add a skill
 
 ```bash
 mkdir my-skill
@@ -81,108 +53,115 @@ When asked to write tests:
 2. Name test files `test_*.py`
 3. Use fixtures for shared setup
 EOF
+
+# Add to source (git commit)
+skillm add ./my-skill/
+# Added my-skill to source 'infra'
+
+# Create a version (git tag)
+skillm publish my-skill
+# Published my-skill@v0.1
 ```
 
-Add it to your local library:
+### 3. Install into your project
 
 ```bash
-skillm add ./my-skill/                       # v0.1
-skillm add ./my-skill/                       # v0.2 (auto-increment)
-skillm add ./my-skill/ --major               # v1.0 (major bump)
+cd your-project/
+skillm install my-skill
+# Installed my-skill@v0.1 → .claude/skills/
+
+# Or install a specific version
+skillm install my-skill@v0.1 --pin
 ```
 
-Or import from external sources:
+### 4. Sync with your team
 
 ```bash
-skillm import owner/repo                     # GitHub
-skillm import clawhub:skill-slug             # ClawHub registry
-skillm import ./skill.skillpack              # portable archive
+skillm push              # git push --tags
+skillm pull              # git pull + rebuild cache
 ```
 
-Manage versions and metadata:
-
-```bash
-skillm versions my-skill                     # list all versions
-skillm info my-skill                         # show details
-skillm rm my-skill --version v0.1            # remove a version
-skillm tag my-skill python web               # add tags
-skillm update ./my-skill/                    # replace latest version in-place
+That's it. Your project now has:
 ```
-
-### 3. Push to the remote
-
-```bash
-skillm push
-# Pushed 3 skills to team (2 new, 1 updated)
+your-project/
+├── .claude/
+│   ├── skills.json      # manifest
+│   ├── skills.lock      # pinned versions + integrity
+│   └── skills/
+│       └── my-skill/
+│           └── SKILL.md
+└── CLAUDE.md            # (use `skillm inject` to auto-update)
 ```
-
-Only the latest version of each skill is pushed. Version numbers are determined by the remote's own history.
 
 ---
 
-## How It Works
-
-```mermaid
-flowchart LR
-    subgraph Sources["📥 Sources"]
-        direction TB
-        S1["SKILL.md\ndirectory"]
-        S2["GitHub\nrepo"]
-        S3["ClawHub\nregistry"]
-        S4[".skillpack\narchive"]
-    end
-
-    subgraph Local["🏠 Local Library  ~/.skillm/"]
-        direction TB
-        DB[("library.db\n(SQLite + FTS5)")]
-        SK["skills/\n├── web-scraper/v0.1/\n├── web-scraper/v0.2/\n└── formatter/v1.0/"]
-        SNAP["snapshots/"]
-    end
-
-    subgraph Remote["🌐 Remote Library"]
-        direction TB
-        RDB[("library.db")]
-        RSK["skills/"]
-    end
-
-    subgraph Project["📁 Your Project"]
-        direction TB
-        Claude[".claude/\n├── skills.json\n└── skills/my-skill/"]
-        Cursor[".cursor/\n└── skills/"]
-        Config["CLAUDE.md\n(auto-injected)"]
-    end
-
-    S1 -->|"skillm add\nskillm import"| Local
-    S2 -->|"skillm import"| Local
-    S3 -->|"skillm import"| Local
-    S4 -->|"skillm import"| Local
-
-    Remote <-->|"skillm pull\nskillm push"| Local
-
-    Local -->|"skillm install"| Project
-    Local -->|"skillm inject"| Config
-```
+## Architecture
 
 ```
-Local Library (~/.skillm/)            Project (your-repo/)
-├── library.db                        ├── .claude/
-├── remotes.toml                      │   ├── skills.json
-├── snapshots/                        │   └── skills/
-└── skills/                           │       ├── web-scraper/SKILL.md
-    ├── web-scraper/v0.1/             │       └── formatter/SKILL.md
-    ├── web-scraper/v0.2/             ├── .cursor/skills/  ← other agents
-    └── formatter/v1.0/               └── CLAUDE.md  ← auto-injected
+┌───────────────────────────────────────────────────┐
+│                    skillm CLI                      │
+├──────────┬──────────┬──────────┬─────────────────┤
+│  source  │ install  │  inject  │     doctor      │
+│  add     │ upgrade  │  search  │     check       │
+│  publish │  sync    │  list    │     cache       │
+├──────────┴──────────┴──────────┴─────────────────┤
+│             SourceManager (core.py)               │
+│             Index Cache (SQLite)                  │
+├──────────┬────────────────────┬──────────────────┤
+│ source:  │    source:          │   source:        │
+│ personal │    infra (git)      │   ai (git)       │
+│ ~/.skillm│    /prgn_share/     │   ssh://...      │
+└──────────┴────────────────────┴──────────────────┘
+                      │
+                      ▼
+              Your Project
+              ├── .claude/skills.json
+              ├── .claude/skills.lock
+              ├── .claude/skills/
+              └── CLAUDE.md
 ```
 
-**The flow:**
-1. **Add** skills from directories, GitHub, ClawHub, or archives into your local library
-2. **Pull** skills from a shared remote library, or **push** your skills to it
-3. **Install** skills from your local library into any project
-4. **Inject** skill references into your agent's config file — your AI agent follows them
+Each source is a git repo. Skills are subdirectories:
+```
+/home/prgn_share/skills/infra/     ← git repo
+├── tree-setup/SKILL.md
+├── run-regression/SKILL.md
+├── p4-submit/SKILL.md
+└── .git/
+```
+
+Version = git tag: `tree-setup/v1.0`, `tree-setup/v1.1`.
+
+## Config: `~/.skillm/sources.toml`
+
+```toml
+[settings]
+cache_dir = "~/.skillm/cache"
+default_source = "infra"
+
+[[sources]]
+name = "infra"
+url = "/home/prgn_share/skills/infra"
+priority = 10          # lower = higher priority
+
+[[sources]]
+name = "ai"
+url = "ssh://git@server:/opt/skills/ai.git"
+priority = 20
+
+[[sources]]
+name = "personal"
+url = "~/.skillm/personal"
+priority = 30
+```
+
+When a skill exists in multiple sources, the highest-priority source wins.
+
+---
 
 ## What is a Skill?
 
-A skill is a directory with a `SKILL.md` file:
+A directory with a `SKILL.md`:
 
 ```
 my-skill/
@@ -195,326 +174,135 @@ my-skill/
 
 ```yaml
 ---
-name: web-scraper                 # skill name (default: directory name)
-description: Scrape web pages     # one-line description
-author: alice                     # author (default: git config user.name)
-tags: [web, scraping, python]     # searchable tags
-source: owner/repo                # where it was imported from
-
-requires:                         # environment requirements
-  bins: [python3, docker]         # CLI tools (checked via `which`)
-  packages: [httpx, click]       # Python packages (checked via importlib)
-  python: ">=3.10"               # Python version constraint
-  env: [API_KEY, SECRET]         # required environment variables
-  platform: [linux, macos]       # supported platforms
+name: web-scraper
+description: Scrape web pages cleanly
+author: alice
+tags: [web, scraping, python]
+requires:
+  bins: [python3, docker]
+  packages: [httpx, click]
+  python: ">=3.10"
+  env: [API_KEY]
+  platform: [linux, macos]
 ---
-```
 
-Simple format also works:
+# Web Scraper
 
-```yaml
----
-requires: [python3, docker]       # treated as binary requirements
----
+Instructions for the AI agent...
 ```
 
 ---
-
-## Features
-
-### Library — Managing Skills
-
-**Add and version:**
-
-```bash
-skillm add ./my-skill/                       # creates v0.1
-skillm add ./my-skill/                       # creates v0.2 (auto-increment)
-skillm add ./my-skill/ --major               # creates v1.0 (major bump)
-skillm add ./my-skill/ --version custom-tag  # explicit version string
-skillm add ./my-skill/ --name alt-name       # override skill name from SKILL.md
-skillm add ./my-skill/ -c coding             # set category on add
-```
-
-Every `add` creates a new version. Versions are never overwritten — safe from accidental breakage.
-
-**Update in-place:**
-
-```bash
-skillm update ./my-skill/                    # overwrites latest version
-skillm update ./my-skill/ --name alt-name    # override skill name
-```
-
-Replace the latest version without creating a new one. Useful for fixing typos or small corrections. Errors if the skill doesn't exist — use `add` for new skills.
-
-**Remove:**
-
-```bash
-skillm rm my-skill --version v0.1   # remove a specific version
-skillm rm my-skill                  # remove skill entirely (all versions)
-```
-
-**Browse and search:**
-
-```bash
-skillm list                         # all skills, grouped by category
-skillm list -c coding               # filter by category
-skillm search "pytest"              # full-text search across skill content
-skillm info my-skill                # show details, versions, tags, size
-skillm versions my-skill            # list all versions with sizes and dates
-```
-
-**Organize with categories and tags:**
-
-```bash
-skillm categorize my-skill devops   # set or change category
-skillm tag my-skill python web      # add tags
-skillm untag my-skill web           # remove tags
-skillm categories                   # list categories with skill counts
-```
-
-**Import from external sources:**
-
-```bash
-skillm import owner/repo                     # GitHub repository
-skillm import owner/repo/subdir              # GitHub subdirectory
-skillm import owner/repo --ref v1.0          # specific git ref (tag, branch)
-skillm import owner/repo --token ghp_xxx     # private repo with auth token
-skillm import clawhub:slug                   # ClawHub registry
-skillm import clawhub:slug@1.0.0 --token xxx # ClawHub specific version with auth
-skillm import https://example.com/skill.tar.gz  # URL (tar.gz or zip)
-skillm import ./skill.skillpack              # portable archive
-skillm import ./path/to/dir                  # local directory
-skillm import <source> --name custom-name    # override skill name
-```
-
-**Export as portable archives:**
-
-```bash
-skillm export my-skill                       # export latest version
-skillm export my-skill --version v1.0        # export specific version
-skillm export my-skill --output /tmp/        # custom output directory
-```
-
-`.skillpack` files are portable tar.gz archives with metadata.
-
-### Project — Installing and Using Skills
-
-**Install:**
-
-```bash
-skillm install my-skill                      # install latest version
-skillm install my-skill@v0.1                 # install specific version
-skillm install my-skill@v0.1 --pin           # pin to this version (skip on upgrade)
-skillm install my-skill --agent cursor       # install into .cursor/skills/
-skillm install my-skill -r /path/to/project  # install in a specific project dir
-```
-
-On install, `skillm` automatically checks the skill's environment requirements and warns about any that aren't met.
-
-**Manage project skills:**
-
-```bash
-skillm uninstall my-skill            # remove skill from project
-skillm sync                          # install all missing skills from skills.json
-skillm upgrade                       # update all skills to latest library versions
-skillm upgrade my-skill              # update one skill
-skillm enable my-skill               # re-enable a disabled skill
-skillm disable my-skill              # hide from agent, keep files
-```
-
-All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `--project-root/-r` options.
-
-**Inject into agent config:**
-
-```bash
-skillm inject                        # auto-detect agent format
-skillm inject --format claude        # force CLAUDE.md
-skillm inject --format cursor        # force .cursorrules
-skillm inject --file ./custom.md     # custom config file path
-```
-
-| Agent | Skills directory | Config file |
-|-------|-----------------|-------------|
-| Claude Code | `.claude/skills/` | `CLAUDE.md` |
-| Cursor | `.cursor/skills/` | `.cursorrules` |
-| Codex | `.codex/skills/` | `AGENTS.md` |
-| OpenClaw | `.openclaw/skills/` | `AGENTS.md` |
-
-Injected content is wrapped in markers (`<!-- skillm:start -->` / `<!-- skillm:end -->`) and cleanly updated on subsequent runs.
-
-**Check environment requirements:**
-
-```bash
-skillm check my-skill                # check a library skill
-skillm check my-skill --no-scan      # skip auto-detection, check declared only
-skillm doctor                        # check all project skills
-skillm doctor --no-scan              # check declared requirements only
-```
-
-```
-my-skill environment check:
-  ✓ python3 — Found at /usr/bin/python3
-  ✓ pytest — Installed (8.1.0)
-  ✗ PROXY_URL — Not set
-  2 passed, 1 failed
-
-  Auto-detected (not in frontmatter):
-    packages: ['requests']
-```
-
-By default, `skillm` auto-scans `SKILL.md` code blocks to detect undeclared requirements — Python imports, CLI tools, pip installs, environment variables. Use `--no-scan` to check only declared frontmatter requirements.
-
-### Sharing — Remotes, Push, and Pull
-
-**Configure remotes:**
-
-```bash
-skillm remote add team /home/prgn_share/skillm       # shared path
-skillm remote add prod ssh://user@server:/shared/lib  # SSH remote
-skillm remote list             # show all remotes, mark active
-skillm remote rm old-server    # remove a remote
-skillm remote switch team      # change which library is your local/active one
-```
-
-**Push and pull:**
-
-```bash
-skillm push                    # push to default remote (first non-active)
-skillm push team               # push to a specific remote
-skillm pull                    # pull from default remote
-skillm pull team               # pull from a specific remote
-```
-
-If you only have one remote besides your active library, `push`/`pull` use it automatically — no name needed.
-
-All `add`/`rm`/`update` operations work on your local library. Use `push` and `pull` to sync with remotes.
-
-**SSH safety**: writes acquire a remote file lock (`flock`) so multiple team members can safely push to the same library without corrupting the database.
-
-### Operations — Snapshots and Maintenance
-
-**Database snapshots:**
-
-Every write operation auto-snapshots the database. If something goes wrong, roll back instantly.
-
-```bash
-skillm library snapshots     # list snapshots with timestamps and sizes
-skillm library rollback      # restore the most recent snapshot
-skillm library rollback library.db.20260312T103045123456Z  # restore specific
-```
-
-Rollback creates a safety snapshot first, so you can undo a rollback too.
-
-Pruning is automatic:
-- Snapshots older than **30 days** are removed
-- Total snapshot size capped at **100MB**
-- At least **10 snapshots** always kept regardless
-
-**Library maintenance:**
-
-```bash
-skillm library init                  # initialize local library (auto-runs on first use)
-skillm library init --path /custom   # initialize at a custom path
-skillm library stats                 # skill count, total size, backend type
-skillm library check                 # verify DB matches files on disk
-skillm library rebuild               # rebuild DB from skill files (fixes corruption)
-skillm library compact               # VACUUM the SQLite database
-```
-
----
-
-## Architecture
-
-```
-CLI (Click)
-  └─► Core Engine (Library + Project)
-        ├─► Storage Backend
-        │     ├── LocalBackend    — filesystem (default)
-        │     └── SSHBackend      — remote via ssh/scp/rsync + flock
-        ├─► Database (SQLite + FTS5)
-        ├─► Metadata Parser (YAML frontmatter)
-        ├─► Scanner (auto-detect requirements)
-        ├─► Checker (verify environment)
-        ├─► Importer (GitHub, ClawHub, URL)
-        └─► Snapshot Manager
-```
-
-## Tech Stack
-
-| Component | Technology |
-|-----------|------------|
-| Language | Python 3.10+ |
-| CLI | Click |
-| Database | SQLite + FTS5 |
-| Terminal UI | Rich |
-| Config | TOML |
-| Metadata | YAML frontmatter (pyyaml) |
-| HTTP | httpx |
-| Package format | tar.gz (.skillpack) |
 
 ## Command Reference
 
-### Library Management
+### Source Management
 
 | Command | Description |
 |---------|-------------|
-| `skillm library init [--path PATH]` | Initialize a new library (default: ~/.skillm) |
-| `skillm library stats` | Show library statistics |
-| `skillm library rebuild` | Rebuild DB from skill files on disk |
-| `skillm library compact` | VACUUM the SQLite database |
-| `skillm library check` | Verify DB matches files on disk |
-| `skillm library snapshots` | List DB snapshots |
-| `skillm library rollback [SNAPSHOT]` | Restore a DB snapshot (default: latest) |
+| `skillm source init NAME PATH` | Initialize a new source (creates git repo) |
+| `skillm source add NAME URL [--priority N]` | Add an existing source |
+| `skillm source rm NAME` | Remove a source (keeps the git repo) |
+| `skillm source list` | List all sources |
+| `skillm source default NAME` | Set default source |
 
-### Skills (Library)
+### Skills
 
 | Command | Description |
 |---------|-------------|
-| `skillm add <dir> [--name NAME] [--major] [--version VER] [-c CAT]` | Add a skill (creates new version) |
-| `skillm update <dir> [--name NAME]` | Replace latest version in-place |
-| `skillm rm <name> [--version VER]` | Remove a skill or specific version |
+| `skillm add <dir> [--source S] [--message M] [--name N] [-c CAT]` | Add skill to source (git commit) |
+| `skillm publish <name> [--major] [--source S]` | Create version tag (git tag) |
+| `skillm rm <name> [--version V] [--source S]` | Remove skill or version |
 | `skillm info <name>` | Show skill details |
-| `skillm list [-c CATEGORY]` | List all skills (optionally filter by category) |
-| `skillm search <query>` | Full-text search across skill content |
-| `skillm versions <name>` | List all versions with sizes and dates |
+| `skillm list [-c CAT] [--source S]` | List skills |
+| `skillm search <query>` | Search across all sources |
+| `skillm versions <name>` | List all versions |
 | `skillm tag <name> <tags...>` | Add tags |
 | `skillm untag <name> <tags...>` | Remove tags |
-| `skillm categorize <name> <category>` | Set category |
-| `skillm categories` | List categories with skill counts |
-| `skillm check <name> [--scan/--no-scan]` | Check skill environment requirements |
+| `skillm categorize <name> <cat>` | Set category |
+| `skillm categories` | List categories with counts |
+| `skillm check <name> [--scan/--no-scan]` | Check environment requirements |
+
+### Git Operations
+
+| Command | Description |
+|---------|-------------|
+| `skillm push [SOURCE]` | git push --tags |
+| `skillm pull [SOURCE]` | git pull + rebuild cache |
+| `skillm log <name>` | git log for a skill |
+| `skillm diff <name>` | Uncommitted changes for a skill |
 
 ### Project
 
-All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `--project-root/-r PATH` options.
+All accept `--agent/-a` (claude, cursor, codex, openclaw) and `--project-root/-r`.
 
 | Command | Description |
 |---------|-------------|
-| `skillm install <name[@ver]> [--pin]` | Install skill into project |
-| `skillm uninstall <name>` | Remove skill from project |
-| `skillm sync` | Install all missing skills from skills.json |
-| `skillm upgrade [name]` | Update to latest library versions |
+| `skillm install <name[@ver]> [--pin] [--source S]` | Install skill into project |
+| `skillm uninstall <name>` | Remove from project |
+| `skillm sync` | Install missing skills from skills.json |
+| `skillm upgrade [name]` | Update to latest versions |
 | `skillm enable <name>` | Re-enable a disabled skill |
-| `skillm disable <name>` | Hide skill from agent (keep files) |
-| `skillm doctor [--scan/--no-scan]` | Check requirements for all project skills |
-| `skillm inject [--format FMT] [--file PATH]` | Inject skill references into agent config |
+| `skillm disable <name>` | Hide from agent, keep files |
+| `skillm doctor` | Check all project skills |
+| `skillm inject [--format F]` | Inject into agent config |
+
+### Cache & Migration
+
+| Command | Description |
+|---------|-------------|
+| `skillm cache rebuild [--source S]` | Rebuild SQLite index from git |
+| `skillm cache stats` | Show cache statistics |
+| `skillm migrate` | Migrate from v1 config to v2 |
 
 ### Import/Export
 
 | Command | Description |
 |---------|-------------|
-| `skillm import <source> [--name NAME] [--ref REF] [--token TOKEN]` | Import from GitHub/ClawHub/URL/file |
-| `skillm export <name> [--version VER] [--output DIR]` | Export as .skillpack archive |
+| `skillm import <src> [--source S] [--name N] [--ref R] [--token T]` | Import from GitHub/ClawHub/URL/file |
+| `skillm export <name> [--version V] [--output DIR]` | Export as .skillpack archive |
 
-### Remotes & Sync
+---
 
-| Command | Description |
-|---------|-------------|
-| `skillm remote add <name> <path>` | Add a remote (local path or ssh://...) |
-| `skillm remote rm <name>` | Remove a remote |
-| `skillm remote switch <name>` | Switch active local library |
-| `skillm remote list` | List all remotes, mark active |
-| `skillm push [remote]` | Push all skills to remote (default: first non-active) |
-| `skillm pull [remote]` | Pull all skills from remote (default: first non-active) |
+## Key Workflows
+
+### Add → Publish → Push
+
+```bash
+skillm add ./my-skill/ --source infra    # copies to repo, git commit
+skillm publish my-skill                   # creates git tag my-skill/v0.1
+skillm push                               # git push --tags
+```
+
+### Pull → Install → Upgrade
+
+```bash
+skillm pull                               # git pull, rebuild cache
+skillm install tree-setup@v1.2            # extract at tag, copy to project
+skillm upgrade                            # update all to latest tags
+```
+
+### Multi-source priority
+
+```bash
+skillm source add infra /shared/skills --priority 10
+skillm source add personal ~/.skillm/mine --priority 30
+
+# `skillm install deploy` picks infra's version (priority 10 < 30)
+# `skillm install deploy --source personal` forces personal
+```
+
+## Migrating from v1
+
+If you have an existing skillm v1 setup (`config.toml` + `remotes.toml`):
+
+```bash
+skillm migrate
+# Migrated to sources.toml format.
+#   Source: local → /home/user/.skillm
+#   Source: team → /home/prgn_share/skillm
+```
+
+This converts your remotes into sources. Your existing skill files in the source directories are preserved — run `skillm cache rebuild` to index them.
 
 ## License
 

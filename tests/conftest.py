@@ -1,21 +1,26 @@
-"""Shared test fixtures."""
+"""Shared test fixtures for skillm v2."""
 
 import json
 import pytest
 from pathlib import Path
-from skillm.config import Config
-from skillm.core import Library, Project
+from skillm.config import Config, Source
+from skillm.core import SourceManager, Project
 
 
 @pytest.fixture
-def tmp_library(tmp_path):
-    """Create a temporary library."""
-    lib_path = tmp_path / "library"
+def tmp_source_repo(tmp_path):
+    """Create a temporary source git repo with one source configured."""
+    source_path = tmp_path / "source-repo"
+    cache_path = tmp_path / "cache"
+
     config = Config()
-    config.library.path = str(lib_path)
-    lib = Library(config)
-    lib.init()
-    return lib
+    config.settings.cache_dir = str(cache_path)
+    config.settings.default_source = "test"
+    config.sources = [Source(name="test", url=str(source_path), priority=10)]
+
+    sm = SourceManager(config)
+    sm.init_source("test", str(source_path))
+    return sm
 
 
 @pytest.fixture
@@ -39,10 +44,14 @@ def sample_skill(tmp_path):
 
 
 @pytest.fixture
-def tmp_project(tmp_path, tmp_library):
-    """Create a temporary project with an initialized library."""
+def tmp_project(tmp_path, tmp_source_repo):
+    """Create a temporary project with an initialized source."""
     project_dir = tmp_path / "project"
     project_dir.mkdir()
-    project = Project(project_dir=project_dir, library=tmp_library, agent="claude")
+    project = Project(
+        project_dir=project_dir,
+        source_manager=tmp_source_repo,
+        agent="claude",
+    )
     project.init()
     return project
