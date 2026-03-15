@@ -117,6 +117,63 @@ def test_tags(tmp_library, sample_skill):
     assert "new-tag" not in skill.tags
 
 
+def test_tag_updates_frontmatter(tmp_library, sample_skill):
+    """tag/untag should update SKILL.md frontmatter, not just DB."""
+    tmp_library.publish(sample_skill)
+    tmp_library.tag("my-skill", ["new-tag"])
+
+    # Read SKILL.md directly to verify frontmatter was updated
+    skill_md = tmp_library.backend.skills_dir / "my-skill" / "SKILL.md"
+    from skillm.metadata import extract_metadata
+    meta = extract_metadata(skill_md.parent)
+    assert "new-tag" in meta.tags
+
+    tmp_library.untag("my-skill", ["new-tag"])
+    meta = extract_metadata(skill_md.parent)
+    assert "new-tag" not in meta.tags
+
+
+def test_categorize_updates_frontmatter(tmp_library, sample_skill):
+    """categorize should update SKILL.md frontmatter."""
+    tmp_library.publish(sample_skill)
+    tmp_library.categorize("my-skill", "devops")
+
+    skill_md = tmp_library.backend.skills_dir / "my-skill" / "SKILL.md"
+    from skillm.metadata import extract_metadata
+    meta = extract_metadata(skill_md.parent)
+    assert meta.category == "devops"
+
+    # DB should also be updated
+    skill = tmp_library.info("my-skill")
+    assert skill.category == "devops"
+
+
+def test_find_skills_by_tag(tmp_library, sample_skill, tmp_path):
+    """find_skills_by_tag scans working tree SKILL.md files."""
+    tmp_library.publish(sample_skill)
+
+    # sample_skill has tags: test, sample
+    matches = tmp_library.find_skills_by_tag("test")
+    assert len(matches) == 1
+    assert matches[0][0] == "my-skill"
+
+    matches = tmp_library.find_skills_by_tag("nonexistent")
+    assert len(matches) == 0
+
+
+def test_find_skills_by_category(tmp_library, sample_skill):
+    """find_skills_by_category scans working tree SKILL.md files."""
+    tmp_library.publish(sample_skill)
+    tmp_library.categorize("my-skill", "infra")
+
+    matches = tmp_library.find_skills_by_category("infra")
+    assert len(matches) == 1
+    assert matches[0][0] == "my-skill"
+
+    matches = tmp_library.find_skills_by_category("other")
+    assert len(matches) == 0
+
+
 def test_rebuild(tmp_library, sample_skill):
     tmp_library.publish(sample_skill)
     count = tmp_library.rebuild()
@@ -136,6 +193,41 @@ def test_project_add_drop(tmp_project, sample_skill):
 
     assert tmp_project.drop("my-skill")
     assert not (tmp_project.skills_dir / "my-skill").exists()
+
+
+def test_project_soft_install(tmp_project, sample_skill):
+    """Soft install creates a symlink to the library working tree."""
+    tmp_project.library.publish(sample_skill)
+
+    ver = tmp_project.add("my-skill", soft=True)
+    assert ver == "latest"
+
+    dest = tmp_project.skills_dir / "my-skill"
+    assert dest.is_symlink()
+    assert (dest / "SKILL.md").exists()
+
+    # Manifest should record soft=True
+    manifest = tmp_project.list_skills()
+    assert manifest["my-skill"]["soft"] is True
+
+    # Drop should remove the symlink
+    assert tmp_project.drop("my-skill")
+    assert not dest.exists()
+    assert not dest.is_symlink()
+
+
+def test_project_soft_install_reflects_changes(tmp_project, sample_skill):
+    """Soft-installed skill reflects changes in the library immediately."""
+    tmp_project.library.publish(sample_skill)
+    tmp_project.add("my-skill", soft=True)
+
+    # Modify the skill in the library working tree
+    skill_md = tmp_project.library.backend.skills_dir / "my-skill" / "SKILL.md"
+    skill_md.write_text("# Updated\n\nNew content.\n")
+
+    # Project should see the change immediately (symlink)
+    project_md = tmp_project.skills_dir / "my-skill" / "SKILL.md"
+    assert "Updated" in project_md.read_text()
 
 
 def test_project_sync(tmp_project, sample_skill):

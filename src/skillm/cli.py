@@ -529,18 +529,12 @@ def categories_cmd():
 @click.argument("name")
 @click.argument("category")
 def categorize_cmd(name: str, category: str):
-    """Set the category of a skill."""
+    """Set the category of a skill (updates SKILL.md frontmatter)."""
     lib = _get_library()
-    skill = lib.info(name)
-    if skill is None:
-        console.print(f"[red]Skill '{name}' not found[/red]")
-        return
-
-    skill.category = category.strip().lower()
-    from datetime import datetime, timezone
-    skill.updated_at = datetime.now(timezone.utc).isoformat()
-    lib.db.update_skill(skill)
-    console.print(f"[green]{name} → {skill.category}[/green]")
+    if lib.categorize(name, category):
+        console.print(f"[green]{name} → {category.strip().lower()}[/green]")
+    else:
+        console.print(f"[red]Skill '{name}' not found on current branch[/red]")
 
 
 @cli.command()
@@ -578,23 +572,75 @@ _root_option = click.option("--project-root", "-r", default=None,
 
 
 @cli.command("install")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.option("--pin", is_flag=True, help="Pin to this version")
+@click.option("--soft", is_flag=True, help="Symlink to library (always latest)")
+@click.option("--tag", "install_tag", default=None, help="Install all skills matching a tag")
+@click.option("-c", "--category", "install_category", default=None, help="Install all skills matching a category")
 @_agent_option
 @_root_option
-def install_cmd(name: str, pin: bool, agent: str, project_root: str | None):
-    """Install a skill from the library into this project."""
+def install_cmd(name: str | None, pin: bool, soft: bool, install_tag: str | None, install_category: str | None, agent: str, project_root: str | None):
+    """Install skills from the library into this project.
+
+    \b
+    skillm install deploy-k8s              Copy skill into project (hard)
+    skillm install deploy-k8s --soft       Symlink to library (always latest)
+    skillm install --tag k8s               Install all skills tagged 'k8s'
+    skillm install --tag k8s --soft        Symlink all matching skills
+    skillm install -c infra                Install all skills in category
+    """
+    from .check import check_requirements
+    from .metadata import extract_metadata
+
+    project = _get_project(agent=agent, project_root=project_root)
+    lib = project.library
+    mode = "soft" if soft else "hard"
+
+    if install_tag:
+        matches = lib.find_skills_by_tag(install_tag)
+        if not matches:
+            console.print(f"[dim]No skills found with tag '{install_tag}'[/dim]")
+            return
+        for skill_name, meta in matches:
+            try:
+                ver = project.add(skill_name, pin=pin, soft=soft)
+                label = f"→ linked" if soft else f"@{ver}"
+                console.print(f"[green]Installed {skill_name} {label}[/green]")
+            except Exception as e:
+                console.print(f"[red]{skill_name}: {e}[/red]")
+        console.print(f"[green]{len(matches)} skill(s) installed ({mode})[/green]")
+        return
+
+    if install_category:
+        matches = lib.find_skills_by_category(install_category)
+        if not matches:
+            console.print(f"[dim]No skills found in category '{install_category}'[/dim]")
+            return
+        for skill_name, meta in matches:
+            try:
+                ver = project.add(skill_name, pin=pin, soft=soft)
+                label = f"→ linked" if soft else f"@{ver}"
+                console.print(f"[green]Installed {skill_name} {label}[/green]")
+            except Exception as e:
+                console.print(f"[red]{skill_name}: {e}[/red]")
+        console.print(f"[green]{len(matches)} skill(s) installed ({mode})[/green]")
+        return
+
+    if not name:
+        console.print("[red]Provide a skill name, --tag, or --category[/red]")
+        return
+
     version = None
     if "@" in name:
         name, version = name.rsplit("@", 1)
 
-    project = _get_project(agent=agent, project_root=project_root)
-    ver = project.add(name, version=version, pin=pin)
-    console.print(f"[green]Installed {name}@{ver} → {project.skills_dir.relative_to(project.project_dir)}/[/green]")
+    ver = project.add(name, version=version, pin=pin, soft=soft)
+    if soft:
+        console.print(f"[green]Installed {name} → linked to library[/green]")
+    else:
+        console.print(f"[green]Installed {name}@{ver} → {project.skills_dir.relative_to(project.project_dir)}/[/green]")
 
     # Run env check and warn
-    from .check import check_requirements
-    from .metadata import extract_metadata
     skill_dir = project.skills_dir / name
     if skill_dir.exists():
         meta = extract_metadata(skill_dir)

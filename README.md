@@ -170,6 +170,8 @@ my-skill/
 
 ### SKILL.md Frontmatter
 
+**Basic fields:**
+
 ```yaml
 ---
 name: web-scraper
@@ -177,6 +179,8 @@ description: Scrape and parse websites
 author: alice
 tags: [web, scraping, python]
 category: devops
+source: git:https://github.com/team/skills.git     # or ssh://git@server/repo.git
+                                                     # or myhost:/home/user/skills
 requires:
   tools: [python3, curl, jq]       # CLI binaries (checked via `which`)
   env: [API_KEY, DATABASE_URL]      # environment variables
@@ -187,6 +191,29 @@ requires:
 
 Instructions for the agent go here...
 ```
+
+**`source` formats:**
+
+| Origin | Format |
+|--------|--------|
+| HTTPS | `git:https://github.com/team/skills.git` |
+| SSH | `git:ssh://git@server/repo.git` |
+| Perforce | `p4://depot/path/to/skill` |
+| Local path | `hostname:/absolute/path/to/skill` |
+
+**Advanced options** — control agent behavior when using this skill:
+
+```yaml
+---
+name: deploy-k8s
+description: Deploy services to Kubernetes
+disable-model-invocation: false        # allow/disallow LLM calls within skill
+argument-hint: "<bundle_id>"           # hint shown to user for required input
+allowed-tools: [Bash, Read, Grep, Glob]  # restrict which tools the agent can use
+---
+```
+
+All frontmatter fields are optional except the markdown body.
 
 ---
 
@@ -203,9 +230,9 @@ Instructions for the agent go here...
 | `skillm list [-c CATEGORY]` | List all skills (optionally by category) |
 | `skillm search <query>` | Full-text search |
 | `skillm versions <name>` | List all versions with sizes and dates |
-| `skillm tag <name> <tags...>` | Add tags |
-| `skillm untag <name> <tags...>` | Remove tags |
-| `skillm categorize <name> <category>` | Set category |
+| `skillm tag <name> <tags...>` | Add tags (updates SKILL.md frontmatter) |
+| `skillm untag <name> <tags...>` | Remove tags (updates SKILL.md frontmatter) |
+| `skillm categorize <name> <category>` | Set category (updates SKILL.md frontmatter) |
 | `skillm categories` | List categories with skill counts |
 | `skillm export <name> [--version] [--output]` | Export as .skillpack archive |
 | `skillm import <source> [--name] [--ref] [--token]` | Import from GitHub/ClawHub/URL/file |
@@ -216,7 +243,11 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 
 | Command | Description |
 |---------|-------------|
-| `skillm install <name> [--pin]` | Install skill into project |
+| `skillm install <name>` | Copy skill into project (hard install) |
+| `skillm install <name> --soft` | Symlink to library (always latest) |
+| `skillm install --tag <tag>` | Install all skills matching a tag |
+| `skillm install -c <category>` | Install all skills matching a category |
+| `skillm install --tag <tag> --soft` | Symlink all matching skills |
 | `skillm uninstall <name>` | Remove skill from project |
 | `skillm sync` | Install missing skills from skills.json |
 | `skillm upgrade [name]` | Update to latest library versions |
@@ -224,6 +255,11 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 | `skillm inject [--format FMT] [--file PATH]` | Write skill refs into agent config |
 | `skillm enable <name>` | Enable a skill in project |
 | `skillm disable <name>` | Disable a skill in project |
+
+**Hard vs soft install:**
+
+- **Hard** (default) — copies files into the project. Frozen snapshot, won't change until you `upgrade`.
+- **Soft** (`--soft`) — symlinks to the library working tree. Always reflects the latest state. Changes in the library appear immediately in the project.
 
 ### Branch Management
 

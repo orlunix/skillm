@@ -195,6 +195,117 @@ def _extract_meta_block(content: str) -> dict[str, str] | None:
     return result
 
 
+def update_frontmatter(skill_md: Path, updates: dict) -> None:
+    """Update specific fields in SKILL.md YAML frontmatter.
+
+    If no frontmatter exists, creates one. Only modifies specified keys.
+
+    Args:
+        skill_md: Path to the SKILL.md file.
+        updates: Dict of {field: value} to set. Use None to remove a field.
+    """
+    content = skill_md.read_text(encoding="utf-8")
+    match = _FRONTMATTER_RE.match(content)
+
+    if match:
+        fm_text = match.group(1)
+        body = content[match.end():]
+        try:
+            fm = yaml.safe_load(fm_text) or {}
+        except yaml.YAMLError:
+            fm = {}
+    else:
+        fm = {}
+        body = content
+
+    for key, value in updates.items():
+        if value is None:
+            fm.pop(key, None)
+        else:
+            fm[key] = value
+
+    # Dump with consistent field order
+    ordered_keys = ["name", "description", "author", "category", "tags", "requires", "source"]
+    ordered_fm = {}
+    for k in ordered_keys:
+        if k in fm:
+            ordered_fm[k] = fm[k]
+    for k in fm:
+        if k not in ordered_fm:
+            ordered_fm[k] = fm[k]
+
+    new_fm = yaml.dump(ordered_fm, default_flow_style=None, sort_keys=False, allow_unicode=True)
+    skill_md.write_text(f"---\n{new_fm}---\n{body}", encoding="utf-8")
+
+
+def scan_skill_dirs(repo_path: Path) -> list[tuple[str, SkillMeta]]:
+    """Scan all skill directories in a repo working tree.
+
+    Returns list of (skill_name, SkillMeta) for each dir with a SKILL.md.
+    """
+    results = []
+    if not repo_path.exists():
+        return results
+    for item in sorted(repo_path.iterdir()):
+        if not item.is_dir() or item.name.startswith("."):
+            continue
+        skill_md = item / "SKILL.md"
+        if skill_md.exists():
+            try:
+                meta = extract_metadata(item)
+                results.append((item.name, meta))
+            except Exception:
+                continue
+    return results
+
+
+def detect_source(source_dir: Path) -> str:
+    """Auto-detect the origin of a skill directory.
+
+    Checks (in order):
+    1. Git repo — returns git:<remote_url>
+    2. P4 workspace — returns p4:<depot_path>
+    3. Fallback — returns hostname:<absolute_path>
+    """
+    import socket
+    import subprocess
+
+    source_dir = source_dir.resolve()
+
+    # Try git: get remote origin URL
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(source_dir), "remote", "get-url", "origin"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return f"git:{result.stdout.strip()}"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Try P4: map the path to a depot path
+    try:
+        result = subprocess.run(
+            ["p4", "where", str(source_dir / "...")],
+            capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            # p4 where outputs: //depot/path/... //client/path/... /local/path/...
+            parts = result.stdout.strip().split()
+            if parts and parts[0].startswith("//"):
+                # Strip trailing /... if present
+                depot_path = parts[0]
+                if depot_path.endswith("/..."):
+                    depot_path = depot_path[:-4]
+                return f"p4:{depot_path}"
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+    # Fallback: hostname + absolute path
+    hostname = socket.gethostname()
+    return f"{hostname}:{source_dir}"
+
+
 def _git_author() -> str:
     """Try to get author name from git config."""
     import subprocess

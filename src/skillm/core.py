@@ -115,6 +115,11 @@ class Library:
         source_dir = source_dir.resolve()
         meta = extract_metadata(source_dir, name_override=name)
         skill_name = meta.name
+
+        # Auto-detect source if not provided
+        if not source and not meta.source:
+            from .metadata import detect_source
+            source = detect_source(source_dir)
         skill_source = source or meta.source or ""
         lib = self.current_library()
         repo_name = self.config.library.active_repo
@@ -327,18 +332,96 @@ class Library:
         return self.db.search(query)
 
     def tag(self, name: str, tags: list[str]) -> bool:
-        skill = self._resolve_skill(name)
-        if skill is None:
+        """Add tags to a skill — updates SKILL.md frontmatter and commits."""
+        skill_dir = self.backend.skills_dir / name
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
             return False
-        self.db.add_tags(skill.id, tags)
+
+        from .metadata import extract_metadata, update_frontmatter
+        meta = extract_metadata(skill_dir)
+        merged = sorted(set(meta.tags + [t.strip().lower() for t in tags]))
+        update_frontmatter(skill_md, {"tags": merged})
+
+        self.backend.git.add(name)
+        self.backend.git.commit(f"skillm: tag {name} +{','.join(tags)}")
+
+        # Keep DB in sync
+        skill = self._resolve_skill(name)
+        if skill:
+            self.db.set_tags(skill.id, merged)
         return True
 
     def untag(self, name: str, tags: list[str]) -> bool:
-        skill = self._resolve_skill(name)
-        if skill is None:
+        """Remove tags from a skill — updates SKILL.md frontmatter and commits."""
+        skill_dir = self.backend.skills_dir / name
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
             return False
-        self.db.remove_tags(skill.id, tags)
+
+        from .metadata import extract_metadata, update_frontmatter
+        meta = extract_metadata(skill_dir)
+        remove_set = {t.strip().lower() for t in tags}
+        remaining = sorted(t for t in meta.tags if t not in remove_set)
+        update_frontmatter(skill_md, {"tags": remaining if remaining else None})
+
+        self.backend.git.add(name)
+        self.backend.git.commit(f"skillm: untag {name} -{','.join(tags)}")
+
+        # Keep DB in sync
+        skill = self._resolve_skill(name)
+        if skill:
+            self.db.set_tags(skill.id, remaining)
         return True
+
+    def categorize(self, name: str, category: str) -> bool:
+        """Set a skill's category — updates SKILL.md frontmatter and commits."""
+        skill_dir = self.backend.skills_dir / name
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.exists():
+            return False
+
+        from .metadata import update_frontmatter
+        category = category.strip().lower()
+        update_frontmatter(skill_md, {"category": category})
+
+        self.backend.git.add(name)
+        self.backend.git.commit(f"skillm: categorize {name} → {category}")
+
+        # Keep DB in sync
+        skill = self._resolve_skill(name)
+        if skill:
+            skill.category = category
+            self.db.update_skill(skill)
+        return True
+
+    def find_skills_by_tag(self, tag: str) -> list[tuple[str, "SkillMeta"]]:
+        """Find all skills on the current branch that have a given tag.
+
+        Scans SKILL.md frontmatter in the working tree.
+        Returns list of (skill_name, SkillMeta).
+        """
+        from .metadata import scan_skill_dirs
+        tag = tag.strip().lower()
+        results = []
+        for name, meta in scan_skill_dirs(self.backend.skills_dir):
+            if tag in [t.lower() for t in meta.tags]:
+                results.append((name, meta))
+        return results
+
+    def find_skills_by_category(self, category: str) -> list[tuple[str, "SkillMeta"]]:
+        """Find all skills on the current branch that match a category.
+
+        Scans SKILL.md frontmatter in the working tree.
+        Returns list of (skill_name, SkillMeta).
+        """
+        from .metadata import scan_skill_dirs
+        category = category.strip().lower()
+        results = []
+        for name, meta in scan_skill_dirs(self.backend.skills_dir):
+            if (meta.category or "").lower() == category:
+                results.append((name, meta))
+        return results
 
     def stats(self) -> dict:
         return {
@@ -557,52 +640,74 @@ class Project:
     def _save_manifest(self, manifest: dict) -> None:
         self.skills_json.write_text(json.dumps(manifest, indent=2) + "\n")
 
-    def add(self, name: str, version: str | None = None, pin: bool = False) -> str:
-        """Add a skill from library to project. Returns installed version."""
+    def add(self, name: str, version: str | None = None, pin: bool = False, soft: bool = False) -> str:
+        """Add a skill from library to project. Returns installed version.
+
+        If soft=True, creates a symlink to the skill directory in the repo
+        working tree instead of copying files. The skill always reflects the
+        latest state in the library (no need to upgrade).
+        """
         self._ensure_dirs()
-        skill = self.library.info(name)
-        if skill is None:
-            raise ValueError(f"Skill '{name}' not found in library")
 
-        if version is None or version == "latest":
-            ver = self.library.db.get_latest_version(skill.id)
-            if ver is None:
-                raise ValueError(f"No versions found for '{name}'")
-            version = ver.version
-        else:
-            ver = self.library.db.get_version(skill.id, version)
-            if ver is None:
-                raise ValueError(f"Version '{version}' not found for '{name}'")
-
-        # Parse qualified name: "library/skill" → library="library", skill="skill"
-        # Also handle "repo:library/skill" by stripping repo prefix
+        # Parse qualified name
         install_name = name
         if ":" in install_name:
             _, install_name = install_name.split(":", 1)
-
         if "/" in install_name:
             lib_name, skill_name = install_name.split("/", 1)
         else:
             lib_name, skill_name = None, install_name
 
-        # Determine which backend to use for file extraction
-        if skill.repo and self.library.repo_mgr.repo_exists(skill.repo):
-            backend = self.library.repo_mgr.get_backend(skill.repo)
-        else:
-            backend = self.library.backend
-
-        # Copy files from library to project
-        src = backend.get_skill_files(skill_name, version, library=lib_name)
         dest = self.skills_dir / skill_name
-        if dest.exists():
-            shutil.rmtree(dest)
-        shutil.copytree(src, dest)
+
+        if soft:
+            # Soft install: symlink to skill dir in repo working tree
+            backend = self.library.backend
+            src = backend.skills_dir / skill_name
+            if not src.exists():
+                raise ValueError(f"Skill '{skill_name}' not found in working tree")
+
+            if dest.exists() or dest.is_symlink():
+                if dest.is_symlink():
+                    dest.unlink()
+                else:
+                    shutil.rmtree(dest)
+            dest.symlink_to(src)
+
+            version = "latest"
+        else:
+            # Hard install: copy files
+            skill = self.library.info(name)
+            if skill is None:
+                raise ValueError(f"Skill '{name}' not found in library")
+
+            if version is None or version == "latest":
+                ver = self.library.db.get_latest_version(skill.id)
+                if ver is None:
+                    raise ValueError(f"No versions found for '{name}'")
+                version = ver.version
+            else:
+                ver = self.library.db.get_version(skill.id, version)
+                if ver is None:
+                    raise ValueError(f"Version '{version}' not found for '{name}'")
+
+            # Determine which backend to use for file extraction
+            if skill.repo and self.library.repo_mgr.repo_exists(skill.repo):
+                backend = self.library.repo_mgr.get_backend(skill.repo)
+            else:
+                backend = self.library.backend
+
+            src = backend.get_skill_files(skill_name, version, library=lib_name)
+            if dest.exists():
+                shutil.rmtree(dest)
+            shutil.copytree(src, dest)
 
         # Update manifest
         manifest = self._load_manifest()
         manifest["skills"][name] = {
             "version": version,
             "pinned": pin,
+            "soft": soft,
         }
         self._save_manifest(manifest)
 
@@ -618,7 +723,9 @@ class Project:
         self._save_manifest(manifest)
 
         dest = self.skills_dir / name
-        if dest.exists():
+        if dest.is_symlink():
+            dest.unlink()
+        elif dest.exists():
             shutil.rmtree(dest)
 
         return True
