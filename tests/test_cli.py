@@ -30,15 +30,6 @@ def test_version():
     assert "0.2.0" in result.output
 
 
-def test_library_init(tmp_path, monkeypatch):
-    runner = CliRunner()
-    lib_path = tmp_path / "lib"
-    result = runner.invoke(cli, ["library", "init", "--path", str(lib_path)])
-    assert result.exit_code == 0
-    assert "initialized" in result.output.lower()
-    assert (lib_path / "library.db").exists()
-
-
 def test_add_and_list(tmp_path, monkeypatch):
     lib_path = _init_library(tmp_path)
     skill_dir = _create_skill(tmp_path)
@@ -69,7 +60,7 @@ def test_add_and_list(tmp_path, monkeypatch):
     assert "test-skill" in result.output
 
 
-def test_library_create_switch_ls(tmp_path, monkeypatch):
+def test_branch_create_list_delete(tmp_path, monkeypatch):
     lib_path = _init_library(tmp_path)
 
     import skillm.cli
@@ -81,24 +72,24 @@ def test_library_create_switch_ls(tmp_path, monkeypatch):
 
     runner = CliRunner()
 
-    # Create a new library
-    result = runner.invoke(cli, ["library", "create", "infra"])
+    # Create a new branch
+    result = runner.invoke(cli, ["branch", "-n", "infra"])
     assert result.exit_code == 0
     assert "infra" in result.output
 
-    # List libraries — should show both
-    result = runner.invoke(cli, ["library", "ls"])
+    # List branches — should show both
+    result = runner.invoke(cli, ["branch"])
     assert result.exit_code == 0
     assert "infra" in result.output
 
     # Switch back to original
     lib = patched_get_library()
     original = [b for b in lib.list_libraries() if b != "infra"][0]
-    result = runner.invoke(cli, ["library", "switch", original])
+    result = runner.invoke(cli, ["branch", original])
     assert result.exit_code == 0
     assert original in result.output
 
     # Delete infra
-    result = runner.invoke(cli, ["library", "delete", "infra", "--yes"])
+    result = runner.invoke(cli, ["branch", "--rm", "infra", "--yes"])
     assert result.exit_code == 0
     assert "Deleted" in result.output

@@ -1,6 +1,7 @@
 """Local filesystem backend with git-backed versioning.
 
-Skill files live in a git repo at ``library_path/skills/``.
+Each repo is a separate git clone under ``~/.skillm/repos/<name>/``.
+Skill files live at the root of each repo.
 Each branch is a **library** — a curated collection of skills.
 Versions are three-level git tags: ``library/skill/version``.
 """
@@ -17,16 +18,16 @@ from .base import LibraryBackend
 class LocalBackend(LibraryBackend):
     """Local filesystem storage backend using git for versioning.
 
+    Each instance wraps a single git repo (one clone).
     The working tree always reflects the active library (= current branch).
     Tags use three-level namespace: ``library/skill/version``.
     """
 
-    def __init__(self, library_path: Path):
-        self.library_path = library_path
-        self.skills_dir = library_path / "skills"
-        self.db_file = library_path / "library.db"
-        self._cache_dir = library_path / ".cache"
-        self._git = GitRepo(self.skills_dir)
+    def __init__(self, repo_path: Path):
+        self.repo_path = repo_path
+        self.skills_dir = repo_path
+        self._cache_dir = repo_path / ".cache"
+        self._git = GitRepo(repo_path)
 
     @property
     def git(self) -> GitRepo:
@@ -43,20 +44,16 @@ class LocalBackend(LibraryBackend):
         return f"{lib}/{name}/{version}"
 
     def initialize(self) -> None:
-        self.library_path.mkdir(parents=True, exist_ok=True)
-        self.skills_dir.mkdir(exist_ok=True)
+        self.repo_path.mkdir(parents=True, exist_ok=True)
         self._cache_dir.mkdir(exist_ok=True)
         if not self._git.is_repo():
+            # Create .gitignore before init
+            gitignore = self.repo_path / ".gitignore"
+            if not gitignore.exists():
+                gitignore.write_text(".cache/\n")
             self._git.init()
-            # Initial commit on default 'main' branch so tags have something to point at
+            self._git.add(".gitignore")
             self._git.commit("skillm: init")
-
-    def get_db(self) -> Path:
-        return self.db_file
-
-    def put_db(self, local_db: Path) -> None:
-        if local_db != self.db_file:
-            shutil.copy2(local_db, self.db_file)
 
     def get_skill_files(self, name: str, version: str, library: str | None = None) -> Path:
         tag = self._tag_name(name, version, library)
@@ -65,6 +62,7 @@ class LocalBackend(LibraryBackend):
 
         # Extract from git to cache directory
         lib = library or self._current_library()
+        self._cache_dir.mkdir(exist_ok=True)
         cache_path = self._cache_dir / lib / name / version
         if cache_path.exists():
             shutil.rmtree(cache_path)
@@ -161,13 +159,30 @@ class LocalBackend(LibraryBackend):
         """Get the active library name."""
         return self._current_library()
 
-    def create_library(self, name: str) -> None:
-        """Create a new library (orphan branch with init commit)."""
-        self._git.create_branch(name, orphan=True)
+    def _auto_commit(self) -> None:
+        """Commit any uncommitted changes so branch switches don't fail."""
+        if self._git.has_changes():
+            self._git.add("-A")
+            self._git.commit("skillm: auto-commit before switch")
 
-    def switch_library(self, name: str) -> None:
-        """Switch to a different library."""
+    def create_library(self, name: str, orphan: bool = False) -> None:
+        """Create a new library branch.
+
+        If orphan=True, starts empty. Otherwise forks from current branch.
+        """
+        self._auto_commit()
+        self._git.create_branch(name, orphan=orphan)
+
+    def switch_library(self, name: str, reset: bool = False) -> None:
+        """Switch to a different library.
+
+        If reset=True, hard-resets the branch to its remote tracking state
+        (or first commit if no remote) after switching.
+        """
+        self._auto_commit()
         self._git.switch_branch(name)
+        if reset:
+            self._git.reset_branch()
 
     def delete_library(self, name: str) -> None:
         """Delete a library branch."""
@@ -180,31 +195,14 @@ class LocalBackend(LibraryBackend):
         """List all local library names (branches)."""
         return self._git.list_branches()
 
-    # ── Git remote operations ─────────────────────────────────
+    # ── Git push/pull (always target origin) ──────────────────
 
-    def add_remote(self, name: str, url: str) -> None:
-        """Add a git remote to the skills repo."""
-        self._git.add_remote(name, url)
-
-    def remove_remote(self, name: str) -> None:
-        """Remove a git remote from the skills repo."""
-        self._git.remove_remote(name)
-
-    def list_remotes(self) -> list[tuple[str, str]]:
-        """List git remotes as (name, url) pairs."""
-        return self._git.list_remotes()
-
-    def has_remote(self, name: str) -> bool:
-        """Check if a git remote exists."""
-        return self._git.has_remote(name)
-
-    def git_push(self, remote: str = "origin", as_branch: str | None = None) -> str:
-        """Push current branch and tags to a git remote."""
+    def git_push(self, as_branch: str | None = None) -> str:
+        """Push current branch and tags to origin."""
         branch = self._current_library()
         if as_branch:
-            # Push to a different branch name on remote
             result = self._git._run(
-                "push", remote, f"{branch}:{as_branch}", "--tags",
+                "push", "origin", f"{branch}:{as_branch}", "--tags",
                 check=False,
             )
             if result.returncode != 0:
@@ -212,15 +210,12 @@ class LocalBackend(LibraryBackend):
                 raise GitError(f"push failed: {(result.stderr or '').strip()}")
             return (result.stdout or "").strip()
         else:
-            return self._git.push(remote, include_tags=True)
+            return self._git.push("origin", include_tags=True)
 
-    def git_pull(self, remote: str = "origin") -> None:
-        """Fetch all commits and tags from a git remote."""
-        self._git.fetch(remote)
+    def git_pull(self) -> None:
+        """Fetch all commits and tags from origin."""
+        self._git.fetch("origin")
         # Clear cache since tags may have changed
         if self._cache_dir.exists():
             shutil.rmtree(self._cache_dir)
             self._cache_dir.mkdir(exist_ok=True)
-
-    # ── Git remote operations ─────────────────────────────────
-

@@ -10,13 +10,15 @@ from .models import FileRecord, Skill, Version
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    name        TEXT NOT NULL UNIQUE,
+    repo        TEXT NOT NULL DEFAULT 'local',
+    name        TEXT NOT NULL,
     description TEXT DEFAULT '',
     category    TEXT DEFAULT '',
     author      TEXT DEFAULT '',
     source      TEXT DEFAULT '',
     created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL
+    updated_at  TEXT NOT NULL,
+    UNIQUE(repo, name)
 );
 
 CREATE TABLE IF NOT EXISTS versions (
@@ -50,10 +52,13 @@ CREATE TABLE IF NOT EXISTS library_meta (
     value       TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_skills_repo ON skills(repo);
 CREATE INDEX IF NOT EXISTS idx_versions_skill ON versions(skill_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
 CREATE INDEX IF NOT EXISTS idx_files_version ON files(version_id);
 """
+
+SCHEMA_VERSION = "3"
 
 
 class Database:
@@ -73,11 +78,30 @@ class Database:
         return self._conn
 
     def initialize(self) -> None:
-        """Create tables and indexes."""
+        """Create tables and indexes. Handles schema migration."""
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Check if migration needed
+        try:
+            row = self.conn.execute(
+                "SELECT value FROM library_meta WHERE key = 'schema_version'"
+            ).fetchone()
+            if row and row["value"] != SCHEMA_VERSION:
+                # Schema changed — drop and recreate (rebuild required)
+                self.conn.executescript("""
+                    DROP TABLE IF EXISTS files;
+                    DROP TABLE IF EXISTS versions;
+                    DROP TABLE IF EXISTS tags;
+                    DROP TABLE IF EXISTS skills;
+                    DROP TABLE IF EXISTS library_meta;
+                """)
+        except Exception:
+            pass  # Fresh DB or table doesn't exist
+
         self.conn.executescript(SCHEMA)
         self.conn.execute(
-            "INSERT OR IGNORE INTO library_meta(key, value) VALUES('schema_version', '2')"
+            "INSERT OR REPLACE INTO library_meta(key, value) VALUES('schema_version', ?)",
+            (SCHEMA_VERSION,),
         )
         self.conn.commit()
 
@@ -86,33 +110,61 @@ class Database:
             self._conn.close()
             self._conn = None
 
-    # ── Skill CRUD ──────────────────────────────────────────
+    # ── Helper ─────────────────────────────────────────────
 
-    def insert_skill(self, skill: Skill) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO skills(name, description, category, author, source, created_at, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?)",
-            (skill.name, skill.description, skill.category, skill.author, skill.source,
-             skill.created_at, skill.updated_at),
-        )
-        skill_id = cur.lastrowid
-        self.conn.commit()
-        return skill_id
-
-    def get_skill(self, name: str) -> Skill | None:
-        row = self.conn.execute(
-            "SELECT * FROM skills WHERE name = ?", (name,)
-        ).fetchone()
-        if not row:
-            return None
+    def _row_to_skill(self, row) -> Skill:
         skill = Skill(
-            id=row["id"], name=row["name"], description=row["description"],
-            category=row["category"], author=row["author"], source=row["source"],
+            id=row["id"], repo=row["repo"], name=row["name"],
+            description=row["description"], category=row["category"],
+            author=row["author"], source=row["source"],
             created_at=row["created_at"], updated_at=row["updated_at"],
         )
         skill.tags = self.get_tags(skill.id)
         skill.versions = self.get_versions(skill.id)
         return skill
+
+    # ── Skill CRUD ──────────────────────────────────────────
+
+    def insert_skill(self, skill: Skill) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO skills(repo, name, description, category, author, source, created_at, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            (skill.repo, skill.name, skill.description, skill.category,
+             skill.author, skill.source, skill.created_at, skill.updated_at),
+        )
+        skill_id = cur.lastrowid
+        self.conn.commit()
+        return skill_id
+
+    def get_skill(self, name: str, repo: str | None = None) -> Skill | None:
+        if repo:
+            row = self.conn.execute(
+                "SELECT * FROM skills WHERE name = ? AND repo = ?", (name, repo)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM skills WHERE name = ?", (name,)
+            ).fetchone()
+        if not row:
+            return None
+        return self._row_to_skill(row)
+
+    def find_skill_by_short_name(self, short_name: str, repo: str | None = None) -> Skill | None:
+        """Find a skill by its unqualified name (e.g. 'deploy-k8s' matches 'main/deploy-k8s')."""
+        pattern = f"%/{short_name}"
+        if repo:
+            row = self.conn.execute(
+                "SELECT * FROM skills WHERE name LIKE ? AND repo = ? LIMIT 1",
+                (pattern, repo),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM skills WHERE name LIKE ? LIMIT 1",
+                (pattern,),
+            ).fetchone()
+        if not row:
+            return None
+        return self._row_to_skill(row)
 
     def update_skill(self, skill: Skill) -> None:
         self.conn.execute(
@@ -121,26 +173,28 @@ class Database:
         )
         self.conn.commit()
 
-    def delete_skill(self, name: str) -> bool:
-        cur = self.conn.execute("DELETE FROM skills WHERE name = ?", (name,))
+    def delete_skill(self, name: str, repo: str | None = None) -> bool:
+        if repo:
+            cur = self.conn.execute(
+                "DELETE FROM skills WHERE name = ? AND repo = ?", (name, repo)
+            )
+        else:
+            cur = self.conn.execute(
+                "DELETE FROM skills WHERE name = ?", (name,)
+            )
         self.conn.commit()
         return cur.rowcount > 0
 
-    def list_skills(self) -> list[Skill]:
-        rows = self.conn.execute(
-            "SELECT * FROM skills ORDER BY name"
-        ).fetchall()
-        skills = []
-        for row in rows:
-            skill = Skill(
-                id=row["id"], name=row["name"], description=row["description"],
-                category=row["category"], author=row["author"], source=row["source"],
-                created_at=row["created_at"], updated_at=row["updated_at"],
-            )
-            skill.tags = self.get_tags(skill.id)
-            skill.versions = self.get_versions(skill.id)
-            skills.append(skill)
-        return skills
+    def list_skills(self, repo: str | None = None) -> list[Skill]:
+        if repo:
+            rows = self.conn.execute(
+                "SELECT * FROM skills WHERE repo = ? ORDER BY name", (repo,)
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM skills ORDER BY name"
+            ).fetchall()
+        return [self._row_to_skill(row) for row in rows]
 
     # ── Version CRUD ────────────────────────────────────────
 
@@ -257,27 +311,26 @@ class Database:
         """No-op — kept for API compatibility."""
         pass
 
-    def search(self, query: str) -> list[Skill]:
+    def search(self, query: str, repo: str | None = None) -> list[Skill]:
         """Search across name, description, category, and tags using LIKE."""
         pattern = f"%{query}%"
-        rows = self.conn.execute(
-            "SELECT DISTINCT s.* FROM skills s "
-            "LEFT JOIN tags t ON s.id = t.skill_id "
-            "WHERE s.name LIKE ? OR s.description LIKE ? OR s.category LIKE ? OR t.tag LIKE ? "
-            "ORDER BY s.name",
-            (pattern, pattern, pattern, pattern),
-        ).fetchall()
-        skills = []
-        for row in rows:
-            skill = Skill(
-                id=row["id"], name=row["name"], description=row["description"],
-                category=row["category"], author=row["author"], source=row["source"],
-                created_at=row["created_at"], updated_at=row["updated_at"],
-            )
-            skill.tags = self.get_tags(skill.id)
-            skill.versions = self.get_versions(skill.id)
-            skills.append(skill)
-        return skills
+        if repo:
+            rows = self.conn.execute(
+                "SELECT DISTINCT s.* FROM skills s "
+                "LEFT JOIN tags t ON s.id = t.skill_id "
+                "WHERE s.repo = ? AND (s.name LIKE ? OR s.description LIKE ? OR s.category LIKE ? OR t.tag LIKE ?) "
+                "ORDER BY s.name",
+                (repo, pattern, pattern, pattern, pattern),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT DISTINCT s.* FROM skills s "
+                "LEFT JOIN tags t ON s.id = t.skill_id "
+                "WHERE s.name LIKE ? OR s.description LIKE ? OR s.category LIKE ? OR t.tag LIKE ? "
+                "ORDER BY s.name",
+                (pattern, pattern, pattern, pattern),
+            ).fetchall()
+        return [self._row_to_skill(row) for row in rows]
 
     # ── Library Meta ────────────────────────────────────────
 
@@ -312,17 +365,7 @@ class Database:
             rows = self.conn.execute(
                 "SELECT * FROM skills WHERE category = ? ORDER BY name", (category,)
             ).fetchall()
-        skills = []
-        for row in rows:
-            skill = Skill(
-                id=row["id"], name=row["name"], description=row["description"],
-                category=row["category"], author=row["author"], source=row["source"],
-                created_at=row["created_at"], updated_at=row["updated_at"],
-            )
-            skill.tags = self.get_tags(skill.id)
-            skill.versions = self.get_versions(skill.id)
-            skills.append(skill)
-        return skills
+        return [self._row_to_skill(row) for row in rows]
 
     def vacuum(self) -> None:
         self.conn.execute("VACUUM")

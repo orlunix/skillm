@@ -101,6 +101,21 @@ class GitRepo:
         """Switch to an existing branch."""
         self._run("checkout", name)
 
+    def reset_branch(self) -> None:
+        """Hard-reset current branch to its remote tracking ref or first commit.
+
+        If the branch tracks a remote (e.g. origin/main), resets to that.
+        Otherwise resets to the branch's root commit (first commit).
+        """
+        upstream = self.get_upstream()
+        if upstream:
+            self._run("reset", "--hard", upstream)
+        else:
+            # Reset to first commit on this branch
+            result = self._run("rev-list", "--max-parents=0", "HEAD")
+            root = result.stdout.strip().split("\n")[0]
+            self._run("reset", "--hard", root)
+
     def delete_branch(self, name: str) -> None:
         """Delete a branch."""
         self._run("branch", "-D", name)

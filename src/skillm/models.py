@@ -9,6 +9,7 @@ from datetime import datetime
 @dataclass
 class Skill:
     id: int | None = None
+    repo: str = ""
     name: str = ""
     description: str = ""
     category: str = ""

@@ -14,14 +14,6 @@ class LibraryBackend(ABC):
         """Set up the backend (create dirs, etc.)."""
 
     @abstractmethod
-    def get_db(self) -> Path:
-        """Get or download library.db to a local path."""
-
-    @abstractmethod
-    def put_db(self, local_db: Path) -> None:
-        """Upload/save the updated library.db."""
-
-    @abstractmethod
     def get_skill_files(self, name: str, version: str, library: str | None = None) -> Path:
         """Fetch skill files, return local directory path."""
 

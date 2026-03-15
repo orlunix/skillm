@@ -14,6 +14,7 @@ CONFIG_FILENAME = "config.toml"
 class LibraryConfig:
     backend: str = "local"
     path: str = str(DEFAULT_LIBRARY_PATH)
+    active_repo: str = ""
     # SSH fields
     host: str = ""
     port: int = 22
@@ -75,6 +76,7 @@ def save_config(config: Config, config_path: Path | None = None) -> None:
         "[library]",
         f'backend = "{config.library.backend}"',
         f'path = "{config.library.path}"',
+        f'active_repo = "{config.library.active_repo}"',
     ]
     if config.library.backend == "ssh":
         lines.extend([

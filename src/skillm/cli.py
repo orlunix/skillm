@@ -59,236 +59,86 @@ def cli():
     """skillm — Local-first skill manager for AI coding agents."""
 
 
-# ── Library ─────────────────────────────────────────────────
+# ── Branch management ──────────────────────────────────────
 
-@cli.group()
-def library():
-    """Manage the skill library."""
+@cli.command("branch")
+@click.argument("name", required=False, default=None)
+@click.option("-n", "--new", "create_new", is_flag=True, help="Create a new branch (forks from current)")
+@click.option("--empty", is_flag=True, help="With -n: start empty instead of forking")
+@click.option("--reset", is_flag=True, help="Reset branch to remote/initial state (drops local commits)")
+@click.option("--rm", "remove", is_flag=True, help="Delete a branch")
+@click.option("--yes", is_flag=True, help="Skip confirmation for --rm/--reset")
+def branch_cmd(name: str | None, create_new: bool, empty: bool, reset: bool, remove: bool, yes: bool):
+    """Switch, create, delete, or list branches.
 
-
-@library.command("init")
-@click.option("--path", default=None, help="Library path (default: ~/.skillm)")
-def library_init(path: str | None):
-    """Initialize a new skill library."""
-    config = Config()
-    if path:
-        config.library.path = path
-    lib = Library(config)
-    lib.init()
-    console.print(f"[green]Library initialized at {lib.config.library_path}[/green]")
-
-
-@library.command("stats")
-def library_stats():
-    """Show library statistics."""
-    lib = _get_library()
-    s = lib.stats()
-    console.print(
-        f"Skills: [bold]{s['skills']}[/bold] | "
-        f"Versions: [bold]{s['versions']}[/bold] | "
-        f"Size: [bold]{_format_size(s['total_size'])}[/bold] | "
-        f"Backend: [bold]{s['backend']}[/bold]"
-    )
-
-
-@library.command("rebuild")
-def library_rebuild():
-    """Rebuild database from skill files on disk."""
-    lib = _get_library()
-    count = lib.rebuild()
-    console.print(f"[green]Rebuilt database: {count} skill version(s) indexed.[/green]")
-
-
-@library.command("compact")
-def library_compact():
-    """Compact the database (VACUUM)."""
-    lib = _get_library()
-    lib.db.vacuum()
-    console.print("[green]Database compacted.[/green]")
-
-
-@library.command("create")
-@click.argument("name")
-def library_create(name: str):
-    """Create a new library (independent skill collection)."""
-    lib = _get_library()
-    if name in lib.list_libraries():
-        console.print(f"[red]Library '{name}' already exists[/red]")
-        return
-    lib.create_library(name)
-    console.print(f"[green]Created library '{name}' and switched to it[/green]")
-
-
-@library.command("switch")
-@click.argument("name")
-def library_switch(name: str):
-    """Switch to a different library."""
-    lib = _get_library()
-    if name not in lib.list_libraries():
-        console.print(f"[red]Library '{name}' not found. Use 'skillm library create {name}' to create it.[/red]")
-        return
-    lib.switch_library(name)
-    console.print(f"[green]Switched to library '{name}'[/green]")
-
-
-@library.command("delete")
-@click.argument("name")
-@click.option("--yes", is_flag=True, help="Skip confirmation")
-def library_delete(name: str, yes: bool):
-    """Delete a library. Cannot delete the active library."""
-    lib = _get_library()
-    if not yes:
-        click.confirm(f"Delete library '{name}'? This cannot be undone.", abort=True)
-    try:
-        lib.delete_library(name)
-        console.print(f"[green]Deleted library '{name}'[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
-
-
-@library.command("set-remote")
-@click.argument("remote")
-def library_set_remote(remote: str):
-    """Set upstream tracking for the current library."""
-    lib = _get_library()
-    if not lib.has_remote(remote):
-        console.print(f"[red]Remote '{remote}' not found. Use 'skillm remote add' first.[/red]")
-        return
-    try:
-        lib.set_library_remote(remote)
-        current = lib.current_library()
-        console.print(f"[green]Library '{current}' now tracks {remote}/{current}[/green]")
-    except Exception as e:
-        console.print(f"[red]{e}[/red]")
-
-
-@library.command("unset-remote")
-def library_unset_remote():
-    """Remove upstream tracking for the current library."""
-    lib = _get_library()
-    try:
-        lib.unset_library_remote()
-        console.print(f"[green]Removed upstream tracking for '{lib.current_library()}'[/green]")
-    except Exception as e:
-        console.print(f"[red]{e}[/red]")
-
-
-@library.command("ls")
-def library_ls():
-    """List all libraries with tracking info and skill counts."""
-    lib = _get_library()
-    current = lib.current_library()
-    libraries = lib.list_libraries()
-    by_library = lib.backend.list_skill_dirs_by_library()
-
-    if not libraries:
-        console.print("[dim]No libraries.[/dim]")
-        return
-
-    for name in libraries:
-        marker = "* " if name == current else "  "
-        skill_count = len(by_library.get(name, []))
-        upstream = None
-        if name == current:
-            upstream = lib.get_library_upstream()
-
-        tracking = upstream if upstream else "(local)"
-        display_name = f"[bold]{name}[/bold]" if name == current else name
-        console.print(
-            f"  {marker}{display_name}"
-            f"    {tracking}"
-            f"    {skill_count} skill(s)"
-        )
-
-
-@library.command("check")
-def library_check():
-    """Check library integrity."""
-    lib = _get_library()
-    disk_skills = dict(lib.backend.list_skill_dirs())
-    db_skills = {s.name: [v.version for v in s.versions] for s in lib.list_skills()}
-
-    issues = []
-    for name, versions in disk_skills.items():
-        if name not in db_skills:
-            issues.append(f"On disk but not in DB: {name}")
-        else:
-            for v in versions:
-                if v not in db_skills[name]:
-                    issues.append(f"On disk but not in DB: {name}/{v}")
-
-    for name, versions in db_skills.items():
-        if name not in disk_skills:
-            issues.append(f"In DB but not on disk: {name}")
-        else:
-            for v in versions:
-                if v not in disk_skills[name]:
-                    issues.append(f"In DB but not on disk: {name}/{v}")
-
-    if issues:
-        console.print(f"[yellow]Found {len(issues)} issue(s):[/yellow]")
-        for issue in issues:
-            console.print(f"  - {issue}")
-        console.print("[dim]Run 'skillm library rebuild' to fix.[/dim]")
-    else:
-        console.print("[green]Library OK — DB matches disk.[/green]")
-
-
-@library.command("snapshots")
-def library_snapshots():
-    """List database snapshots."""
-    from .snapshot import list_snapshots
-    lib = _get_library()
-    snaps = list_snapshots(lib.config.library_path)
-
-    if not snaps:
-        console.print("[dim]No snapshots.[/dim]")
-        return
-
-    for i, (path, ts) in enumerate(snaps):
-        size = _format_size(path.stat().st_size)
-        marker = " [green]← latest[/green]" if i == 0 else ""
-        console.print(f"  {path.name}  {ts}  ({size}){marker}")
-
-
-@library.command("rollback")
-@click.argument("snapshot", required=False)
-def library_rollback(snapshot: str | None):
-    """Rollback the database to a snapshot.
-
-    Without arguments, rolls back to the most recent snapshot.
-    Pass a snapshot filename to restore a specific one.
+    \b
+    skillm branch                    List all branches
+    skillm branch infra              Switch to branch (auto-commits changes)
+    skillm branch infra --reset      Reset branch to remote/initial state
+    skillm branch -n infra           Fork current branch as 'infra'
+    skillm branch -n infra --empty   Create empty branch
+    skillm branch --rm infra         Delete branch
     """
-    from .snapshot import list_snapshots, rollback, snapshot_dir
-
     lib = _get_library()
-    snap_path = None
-    if snapshot:
-        snap_path = snapshot_dir(lib.config.library_path) / snapshot
-        if not snap_path.exists():
-            console.print(f"[red]Snapshot not found: {snapshot}[/red]")
+
+    # No name → list branches
+    if name is None:
+        current = lib.current_library()
+        branches = lib.list_libraries()
+
+        if not branches:
+            console.print("[dim]No branches.[/dim]")
             return
 
-    try:
-        restored = rollback(lib.config.library_path, snap_path)
-        console.print(f"[green]Rolled back to {restored.name}[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+        for branch in branches:
+            marker = "* " if branch == current else "  "
+            display = f"[bold]{branch}[/bold]" if branch == current else branch
+            console.print(f"  {marker}{display}")
+        return
+
+    if create_new:
+        if name in lib.list_libraries():
+            console.print(f"[red]Branch '{name}' already exists[/red]")
+            return
+        lib.create_library(name, orphan=empty)
+        origin = "empty" if empty else f"forked from '{lib.current_library()}'"
+        console.print(f"[green]Created branch '{name}' ({origin}) and switched to it[/green]")
+    elif remove:
+        if not yes:
+            click.confirm(f"Delete branch '{name}'? This cannot be undone.", abort=True)
+        try:
+            lib.delete_library(name)
+            console.print(f"[green]Deleted branch '{name}'[/green]")
+        except ValueError as e:
+            console.print(f"[red]{e}[/red]")
+    else:
+        if name not in lib.list_libraries():
+            console.print(f"[red]Branch '{name}' not found. Use 'skillm branch -n {name}' to create it.[/red]")
+            return
+        if reset and not yes:
+            click.confirm(
+                f"Reset '{name}' to remote/initial state? All local commits will be lost.",
+                abort=True,
+            )
+        lib.switch_library(name, reset=reset)
+        if reset:
+            console.print(f"[green]Switched to branch '{name}' (reset to remote/initial state)[/green]")
+        else:
+            console.print(f"[green]Switched to branch '{name}'[/green]")
 
 
-# ── Remote Management ─────────────────────────────────────
+# ── Repo Management ────────────────────────────────────────
 
 @cli.group()
-def remote():
-    """Manage git remotes for the skill library."""
+def repo():
+    """Manage skill repos (git clones)."""
 
 
-@remote.command("add")
+@repo.command("add")
 @click.argument("name")
 @click.argument("url")
-@click.option("--default", "set_default", is_flag=True, help="Set as default remote")
-def remote_add(name: str, url: str, set_default: bool):
-    """Add a git remote.
+def repo_add(name: str, url: str):
+    """Clone a remote URL as a named repo.
 
     \b
     URL can be anything git understands:
@@ -296,141 +146,138 @@ def remote_add(name: str, url: str, set_default: bool):
       git@github.com:team/skills.git    SSH
       https://github.com/team/skills    HTTPS
     """
-    from .remote import load_remotes, save_remotes
-
-    lib = _get_library()
-    lib.add_remote(name, url)
-
-    config = load_remotes()
-    if name not in config.remotes:
-        config.remotes.append(name)
-    if set_default or not config.default:
-        config.default = name
-    save_remotes(config)
-
-    console.print(f"[green]Added remote '{name}' → {url}[/green]")
-
-
-@remote.command("rm")
-@click.argument("name")
-def remote_rm(name: str):
-    """Remove a git remote."""
-    from .remote import load_remotes, save_remotes
-
     lib = _get_library()
     try:
-        lib.remove_remote(name)
+        lib.add_repo(name, url)
+        console.print(f"[green]Cloned repo '{name}' from {url}[/green]")
     except Exception as e:
         console.print(f"[red]{e}[/red]")
-        return
-
-    config = load_remotes()
-    if name in config.remotes:
-        config.remotes.remove(name)
-    if config.default == name:
-        config.default = config.remotes[0] if config.remotes else ""
-    save_remotes(config)
-
-    console.print(f"[green]Removed remote '{name}'[/green]")
 
 
-@remote.command("switch")
+@repo.command("init")
 @click.argument("name")
-def remote_switch(name: str):
-    """Set the default remote for push/pull."""
-    from .remote import load_remotes, save_remotes
-
+def repo_init(name: str):
+    """Create a local-only repo (no remote)."""
     lib = _get_library()
-    if not lib.has_remote(name):
-        console.print(f"[red]Remote '{name}' not found[/red]")
+    if lib.repo_mgr.repo_exists(name):
+        console.print(f"[red]Repo '{name}' already exists[/red]")
+        return
+    lib.init_repo(name)
+    console.print(f"[green]Created local repo '{name}'[/green]")
+
+
+@repo.command("rm")
+@click.argument("name")
+@click.option("--yes", is_flag=True, help="Skip confirmation")
+def repo_rm(name: str, yes: bool):
+    """Remove a repo."""
+    lib = _get_library()
+    if not lib.repo_mgr.repo_exists(name):
+        console.print(f"[red]Repo '{name}' not found[/red]")
+        return
+    if not yes:
+        click.confirm(f"Delete repo '{name}'? This cannot be undone.", abort=True)
+    try:
+        lib.remove_repo(name)
+        console.print(f"[green]Removed repo '{name}'[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@repo.command("switch")
+@click.argument("name")
+def repo_switch(name: str):
+    """Switch to a different repo."""
+    lib = _get_library()
+    try:
+        lib.switch_repo(name)
+        console.print(f"[green]Active repo: {name}[/green]")
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+
+
+@repo.command("list")
+def repo_list():
+    """List all repos."""
+    lib = _get_library()
+    repos = lib.list_repos()
+    active = lib.config.library.active_repo
+
+    if not repos:
+        console.print("[dim]No repos. Run: skillm repo init <name>[/dim]")
         return
 
-    config = load_remotes()
-    config.default = name
-    save_remotes(config)
-    console.print(f"[green]Default remote: {name}[/green]")
-
-
-@remote.command("list")
-def remote_list():
-    """List all git remotes."""
-    from .remote import get_default_remote
-
-    lib = _get_library()
-    remotes = lib.list_remotes()
-
-    if not remotes:
-        console.print("[dim]No remotes configured. Run: skillm remote add <name> <url>[/dim]")
-        return
-
-    default = get_default_remote()
-    for name, url in remotes:
-        marker = " [green]← default[/green]" if name == default else ""
-        console.print(f"  [bold]{name}[/bold]  {url}{marker}")
+    for info in repos:
+        marker = " [green]← active[/green]" if info.name == active else ""
+        url_str = f"  {info.url}" if info.url else "  (local)"
+        console.print(f"  [bold]{info.name}[/bold]{url_str}{marker}")
 
 
 # ── Push / Pull ───────────────────────────────────────────
 
 @cli.command("push")
-@click.argument("remote_name", required=False, default=None)
-@click.option("--as", "as_branch", default=None, help="Push to a different branch name on remote")
-def push_cmd(remote_name: str | None, as_branch: str | None):
-    """Push current library and tags to a git remote.
+@click.argument("repo_name", required=False, default=None)
+@click.option("-b", "--branch", "as_branch", default=None,
+              help="Push to a different branch name on remote (creates it if needed)")
+def push_cmd(repo_name: str | None, as_branch: str | None):
+    """Push a repo to its origin.
 
     \b
-    If REMOTE_NAME is omitted, pushes to the tracked remote.
-    Use --as to push to a different branch name (e.g. for review).
+    If REPO_NAME is omitted, pushes the active repo.
+
+    Examples:
+      skillm push                   Push active repo
+      skillm push origin            Push named repo
+      skillm push -b feat-review    Push to new remote branch
     """
     lib = _get_library()
-    current = lib.current_library()
+    target = repo_name or lib.config.library.active_repo
 
     try:
-        lib.push(remote_name, as_branch=as_branch)
-        target = remote_name or "tracked remote"
-        branch_info = f" as '{as_branch}'" if as_branch else ""
-        console.print(f"[green]Pushed '{current}' to {target}{branch_info}[/green]")
+        lib.push(repo_name, as_branch=as_branch)
+        branch_info = f" → remote branch '{as_branch}'" if as_branch else ""
+        console.print(f"[green]Pushed repo '{target}'{branch_info}[/green]")
     except Exception as e:
-        console.print(f"[red]Push failed: {e}[/red]")
+        msg = str(e)
+        console.print(f"[red]Push failed: {msg}[/red]")
+        if "protected" in msg.lower() or "denied" in msg.lower() or "rejected" in msg.lower():
+            console.print("[dim]Tip: push to a new branch with: skillm push -b <branch-name>[/dim]")
 
 
 @cli.command("pull")
-@click.argument("remote_name", required=False, default=None)
-@click.option("--branch", "branch_name", default=None, help="Pull specific remote branch")
-@click.option("--as", "as_name", default=None, help="Local library name (if name conflict)")
-def pull_cmd(remote_name: str | None, branch_name: str | None, as_name: str | None):
-    """Pull from a git remote and rebuild the index.
+@click.argument("repo_name", required=False, default=None)
+@click.option("--branch", "branch_name", default=None, help="Fetch and checkout a specific branch")
+def pull_cmd(repo_name: str | None, branch_name: str | None):
+    """Pull from a repo's origin and rebuild the index.
 
     \b
-    If REMOTE_NAME is omitted, pulls from the tracked remote.
-    Use --branch to pull a specific remote branch.
-    Use --as to rename when there's a local name conflict.
+    If REPO_NAME is omitted, pulls the active repo.
+    Use --branch to fetch and checkout a specific remote branch.
     """
     lib = _get_library()
+    target = repo_name or lib.config.library.active_repo
 
     try:
         if branch_name:
-            # Selective pull: fetch specific remote branch
-            remote = remote_name or "origin"
-            local_name = as_name or branch_name
-            git = lib.backend.git
+            backend = lib.repo_mgr.get_backend(target)
+            git = backend.git
 
             # Fetch the specific branch
-            git._run("fetch", remote, f"{branch_name}:refs/remotes/{remote}/{branch_name}")
+            git._run("fetch", "origin", f"{branch_name}:refs/remotes/origin/{branch_name}")
 
             # Create local branch if it doesn't exist
-            if not git.branch_exists(local_name):
-                git._run("branch", "--track", local_name, f"{remote}/{branch_name}")
-                console.print(f"[green]Created library '{local_name}' tracking {remote}/{branch_name}[/green]")
-            else:
-                console.print(f"[green]Updated library '{local_name}' from {remote}/{branch_name}[/green]")
+            if not git.branch_exists(branch_name):
+                git._run("branch", "--track", branch_name, f"origin/{branch_name}")
+                console.print(f"[green]Created library '{branch_name}' tracking origin/{branch_name}[/green]")
+
+            git.switch_branch(branch_name)
 
             # Rebuild to index new tags
             count = lib.rebuild()
             console.print(f"[green]{count} version(s) indexed[/green]")
         else:
-            count = lib.pull(remote_name)
-            source = remote_name or "tracked remote"
-            console.print(f"[green]Pulled from {source} — {count} version(s) indexed[/green]")
+            count = lib.pull(repo_name)
+            console.print(f"[green]Pulled repo '{target}' — {count} version(s) indexed[/green]")
     except Exception as e:
         console.print(f"[red]Pull failed: {e}[/red]")
 
@@ -523,6 +370,8 @@ def info(name: str):
         return
 
     console.print(f"[bold]Name:[/bold] {skill.name}")
+    if skill.repo:
+        console.print(f"[bold]Repo:[/bold] {skill.repo}")
     console.print(f"[bold]Description:[/bold] {skill.description}")
     if skill.category:
         console.print(f"[bold]Category:[/bold] {skill.category}")
@@ -1061,8 +910,6 @@ def import_cmd(source: str, name: str | None, ref: str | None, token: str | None
 
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")
-    except httpx.HTTPStatusError as e:
-        console.print(f"[red]HTTP error: {e.response.status_code} — {e.request.url}[/red]")
     except Exception as e:
         console.print(f"[red]Import failed: {e}[/red]")
 

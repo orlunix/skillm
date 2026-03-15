@@ -182,8 +182,8 @@ def test_push_pull_via_git(tmp_path, sample_skill):
     lib_a.init()
     lib_a.publish(sample_skill)
     lib_a.publish(sample_skill)  # v0.2
-    lib_a.add_remote("shared", str(bare))
-    lib_a.push("shared")
+    lib_a.backend.git.add_remote("origin", str(bare))
+    lib_a.push()
 
     # Library B: pull from bare
     lib_b_path = tmp_path / "lib_b"
@@ -191,8 +191,8 @@ def test_push_pull_via_git(tmp_path, sample_skill):
     config_b.library.path = str(lib_b_path)
     lib_b = Library(config_b)
     lib_b.init()
-    lib_b.add_remote("shared", str(bare))
-    count = lib_b.pull("shared")
+    lib_b.backend.git.add_remote("origin", str(bare))
+    count = lib_b.pull()
 
     # Both versions should be available (rebuild returns version count)
     assert count == 2

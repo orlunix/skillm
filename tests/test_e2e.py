@@ -371,13 +371,13 @@ class TestPushPull:
                              description="A shared tool", tags="shared")
         lib_a.publish(sd)
         lib_a.publish(sd)  # v0.2
-        lib_a.add_remote("origin", str(bare))
-        lib_a.push("origin")
+        lib_a.backend.git.add_remote("origin", str(bare))
+        lib_a.push()
 
         # User B: create library, pull, install
         lib_b = _make_library(tmp_path, "user_b_lib")
-        lib_b.add_remote("origin", str(bare))
-        count = lib_b.pull("origin")
+        lib_b.backend.git.add_remote("origin", str(bare))
+        count = lib_b.pull()
         assert count == 2  # v0.1 and v0.2
 
         skill = lib_b.info("shared-tool")
@@ -407,16 +407,16 @@ class TestPushPull:
         lib_a.publish(sd2)
 
         # Push both libraries
-        lib_a.add_remote("origin", str(bare))
-        lib_a.push("origin")  # pushes "extras" (current)
+        lib_a.backend.git.add_remote("origin", str(bare))
+        lib_a.push()  # pushes "extras" (current)
 
         lib_a.switch_library([b for b in lib_a.list_libraries() if b != "extras"][0])
-        lib_a.push("origin")  # pushes default
+        lib_a.push()  # pushes default
 
         # User B: pull and verify both
         lib_b = _make_library(tmp_path, "user_b")
-        lib_b.add_remote("origin", str(bare))
-        lib_b.pull("origin")
+        lib_b.backend.git.add_remote("origin", str(bare))
+        lib_b.pull()
 
         by_lib = lib_b.backend.list_skill_dirs_by_library()
         # Should have skills from both libraries
@@ -436,10 +436,10 @@ class TestPushPull:
         lib = _make_library(tmp_path)
         sd = _make_skill_dir(tmp_path, "review-skill")
         lib.publish(sd)
-        lib.add_remote("origin", str(bare))
+        lib.backend.git.add_remote("origin", str(bare))
 
         # Push as "review-branch"
-        lib.push("origin", as_branch="review-branch")
+        lib.push(as_branch="review-branch")
 
         # Verify bare repo has the branch
         result = subprocess.run(
@@ -544,7 +544,7 @@ class TestRebuildRecovery:
             assert len(skill.versions) == 2
 
         # Destroy the DB
-        db_path = lib.backend.db_file
+        db_path = lib.db.db_path
         assert db_path.exists()
         db_path.unlink()
 
@@ -571,7 +571,7 @@ class TestRebuildRecovery:
         lib.publish(sd2)
 
         # Destroy and rebuild
-        db_path = lib.backend.db_file
+        db_path = lib.db.db_path
         db_path.unlink()
         count = lib.rebuild()
         assert count == 2  # one from each library
@@ -743,61 +743,52 @@ class TestCLIWorkflows:
         assert "v0.2" in result.output
         assert "v1.0" in result.output
 
-    def test_cli_library_lifecycle(self, tmp_path, monkeypatch):
-        """CLI: library create → ls → switch → delete"""
+    def test_cli_branch_lifecycle(self, tmp_path, monkeypatch):
+        """CLI: branch -n → branch (list) → branch <name> → branch --rm"""
         lib = _make_library(tmp_path)
         _patch_cli_library(monkeypatch, lib)
 
         runner = CliRunner()
 
         # Create
-        result = runner.invoke(cli, ["library", "create", "experiments"])
+        result = runner.invoke(cli, ["branch", "-n", "experiments"])
         assert result.exit_code == 0
         assert "experiments" in result.output
 
         # List — should show both
         default = [b for b in lib.list_libraries() if b != "experiments"][0]
-        result = runner.invoke(cli, ["library", "ls"])
+        result = runner.invoke(cli, ["branch"])
         assert result.exit_code == 0
         assert "experiments" in result.output
 
         # Switch back to default
-        result = runner.invoke(cli, ["library", "switch", default])
+        result = runner.invoke(cli, ["branch", default])
         assert result.exit_code == 0
 
         # Delete experiments
-        result = runner.invoke(cli, ["library", "delete", "experiments", "--yes"])
+        result = runner.invoke(cli, ["branch", "--rm", "experiments", "--yes"])
         assert result.exit_code == 0
         assert "Deleted" in result.output
 
-    def test_cli_remote_add_list_rm(self, tmp_path, monkeypatch):
-        """CLI: remote add → list → rm"""
+    def test_cli_repo_init_list_rm(self, tmp_path, monkeypatch):
+        """CLI: repo init → list → rm"""
         lib = _make_library(tmp_path)
         _patch_cli_library(monkeypatch, lib)
 
-        # Patch remotes config to use tmp_path
-        import skillm.remote
-        remotes_file = tmp_path / "remotes.toml"
-        monkeypatch.setattr(skillm.remote, "_remotes_path",
-                            lambda: remotes_file)
-
-        bare = _make_bare_repo(tmp_path)
         runner = CliRunner()
 
-        # Add
-        result = runner.invoke(cli, ["remote", "add", "origin", str(bare)])
+        # Init a new repo
+        result = runner.invoke(cli, ["repo", "init", "extra"])
         assert result.exit_code == 0
-        assert "Added" in result.output
 
         # List
-        result = runner.invoke(cli, ["remote", "list"])
+        result = runner.invoke(cli, ["repo", "list"])
         assert result.exit_code == 0
-        assert "origin" in result.output
+        assert "extra" in result.output
 
         # Rm
-        result = runner.invoke(cli, ["remote", "rm", "origin"])
+        result = runner.invoke(cli, ["repo", "rm", "extra", "--yes"])
         assert result.exit_code == 0
-        assert "Removed" in result.output
 
     def test_cli_rm(self, tmp_path, monkeypatch):
         """CLI: add → rm → verify gone"""

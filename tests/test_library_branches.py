@@ -161,8 +161,8 @@ def test_push_pull_with_libraries(tmp_path, sample_skill):
     lib_a.init()
 
     lib_a.publish(sample_skill)  # on default branch
-    lib_a.add_remote("shared", str(bare))
-    lib_a.push("shared")
+    lib_a.backend.git.add_remote("origin", str(bare))
+    lib_a.push()
 
     # Library B: pull
     lib_b_path = tmp_path / "lib_b"
@@ -170,22 +170,85 @@ def test_push_pull_with_libraries(tmp_path, sample_skill):
     config_b.library.path = str(lib_b_path)
     lib_b = Library(config_b)
     lib_b.init()
-    lib_b.add_remote("shared", str(bare))
-    count = lib_b.pull("shared")
+    lib_b.backend.git.add_remote("origin", str(bare))
+    count = lib_b.pull()
 
     assert count >= 1
     skill = lib_b.info("my-skill")
     assert skill is not None
 
 
-def test_library_create_is_empty(tmp_library, sample_skill):
-    """A newly created library has no skills."""
+def test_library_create_forks_by_default(tmp_library, sample_skill):
+    """A forked library inherits skills from the current branch."""
     tmp_library.publish(sample_skill)
-    tmp_library.create_library("empty")
+    tmp_library.create_library("forked")
+
+    # Working tree should have the skill from parent branch
+    dirs = tmp_library.backend.git.list_skill_dirs()
+    assert len(dirs) == 1
+    assert "my-skill" in dirs
+
+
+def test_library_create_empty_orphan(tmp_library, sample_skill):
+    """An orphan library starts empty."""
+    tmp_library.publish(sample_skill)
+    tmp_library.create_library("empty", orphan=True)
 
     # Working tree should be empty (no skill dirs)
     dirs = tmp_library.backend.git.list_skill_dirs()
     assert len(dirs) == 0
+
+
+def test_switch_reset_to_initial(tmp_library, sample_skill):
+    """--reset drops local commits and resets to initial state."""
+    lib1 = tmp_library.current_library()
+
+    # Publish a skill (creates commits beyond init)
+    tmp_library.publish(sample_skill)
+
+    # The skill dir should exist in working tree
+    skill_dir = tmp_library.backend.skills_dir / "my-skill"
+    assert skill_dir.exists()
+
+    # Reset: should go back to initial commit (only .gitignore)
+    tmp_library.switch_library(lib1, reset=True)
+    assert not skill_dir.exists()
+
+
+def test_switch_reset_to_remote(tmp_path, sample_skill):
+    """--reset aligns branch with remote tracking ref."""
+    import subprocess
+
+    # Create a bare remote
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
+
+    # Create library A, publish, push
+    lib_a_path = tmp_path / "lib_a"
+    config_a = Config()
+    config_a.library.path = str(lib_a_path)
+    lib_a = Library(config_a)
+    lib_a.init()
+    lib_a.publish(sample_skill)
+    lib_a.backend.git.add_remote("origin", str(bare))
+    lib_a.push()
+
+    # Now publish more locally (not pushed)
+    (sample_skill / "SKILL.md").write_text("# My Skill v2\n\nUpdated.\n")
+    lib_a.publish(sample_skill)
+
+    # We now have local commits ahead of origin
+    branch = lib_a.current_library()
+
+    # Reset should drop the unpushed commit
+    lib_a.switch_library(branch, reset=True)
+
+    # After reset, working tree should match what was pushed (v0.1 only)
+    # The v0.2 tag still exists but the working tree is back to remote state
+    skill_dir = lib_a.backend.skills_dir / "my-skill"
+    content = (skill_dir / "SKILL.md").read_text()
+    assert "v2" not in content
 
 
 def test_auto_version_per_library(tmp_library, sample_skill):
@@ -194,24 +257,8 @@ def test_auto_version_per_library(tmp_library, sample_skill):
     _, ver1 = tmp_library.publish(sample_skill)
     assert ver1 == "v0.2"
 
-    tmp_library.create_library("other")
+    tmp_library.create_library("other", orphan=True)
     _, ver2 = tmp_library.publish(sample_skill)
     assert ver2 == "v0.1"  # starts fresh in new library
 
 
-def test_set_unset_library_remote(tmp_path, tmp_library):
-    """Set and unset upstream tracking for a library."""
-    bare = tmp_path / "bare.git"
-    bare.mkdir()
-    subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
-
-    tmp_library.add_remote("origin", str(bare))
-    tmp_library.push("origin")
-
-    tmp_library.set_library_remote("origin")
-    upstream = tmp_library.get_library_upstream()
-    assert upstream is not None
-    assert "origin" in upstream
-
-    tmp_library.unset_library_remote()
-    assert tmp_library.get_library_upstream() is None

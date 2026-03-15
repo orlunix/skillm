@@ -1,126 +1,118 @@
-"""Tests for remote management (git remotes on skills repo)."""
+"""Tests for RepoManager (multi-repo management)."""
 
+import subprocess
 import pytest
-from skillm.remote import RemoteConfig, load_remotes, save_remotes, get_default_remote
+from pathlib import Path
+
+from skillm.repo import RepoManager
 
 
-def test_empty_config(tmp_path, monkeypatch):
-    monkeypatch.setattr("skillm.remote._remotes_path", lambda: tmp_path / "remotes.toml")
-    config = load_remotes()
-    assert config.default == ""
-    assert config.remotes == []
+@pytest.fixture
+def repo_mgr(tmp_path):
+    """Create a RepoManager with a temporary base path."""
+    return RepoManager(tmp_path)
 
 
-def test_save_load_roundtrip(tmp_path, monkeypatch):
-    monkeypatch.setattr("skillm.remote._remotes_path", lambda: tmp_path / "remotes.toml")
-
-    config = RemoteConfig(default="team", remotes=["team", "backup"])
-    save_remotes(config)
-
-    loaded = load_remotes()
-    assert loaded.default == "team"
-    assert "team" in loaded.remotes
-    assert "backup" in loaded.remotes
-
-
-def test_get_default_remote(tmp_path, monkeypatch):
-    monkeypatch.setattr("skillm.remote._remotes_path", lambda: tmp_path / "remotes.toml")
-
-    assert get_default_remote() is None
-
-    config = RemoteConfig(default="origin", remotes=["origin"])
-    save_remotes(config)
-    assert get_default_remote() == "origin"
-
-
-def test_library_remote_operations(tmp_library):
-    """Test add/remove/list remotes via Library (git remotes on skills repo)."""
-    # Create a bare repo to use as remote
-    import subprocess
-    bare = tmp_library.config.library_path.parent / "bare.git"
+@pytest.fixture
+def bare_repo(tmp_path):
+    """Create a bare git repo to act as a remote."""
+    bare = tmp_path / "remote.git"
     bare.mkdir()
-    subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
-
-    # Add remote
-    tmp_library.add_remote("origin", str(bare))
-    assert tmp_library.has_remote("origin")
-
-    # List remotes
-    remotes = tmp_library.list_remotes()
-    assert len(remotes) == 1
-    assert remotes[0][0] == "origin"
-
-    # Remove remote
-    tmp_library.remove_remote("origin")
-    assert not tmp_library.has_remote("origin")
+    subprocess.run(
+        ["git", "init", "--bare", str(bare)],
+        capture_output=True, check=True,
+    )
+    return bare
 
 
-def test_push_pull_via_git(tmp_path, sample_skill):
-    """Test push/pull between two libraries via a shared bare repo."""
-    import subprocess
-    from skillm.config import Config
-    from skillm.core import Library
-
-    # Create a bare repo (like GitHub)
-    bare = tmp_path / "shared.git"
-    bare.mkdir()
-    subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
-
-    # Create library A, publish a skill, push to bare
-    lib_a_path = tmp_path / "lib_a"
-    config_a = Config()
-    config_a.library.path = str(lib_a_path)
-    lib_a = Library(config_a)
-    lib_a.init()
-    lib_a.publish(sample_skill)
-    lib_a.add_remote("shared", str(bare))
-    lib_a.push("shared")
-
-    # Create library B, pull from bare
-    lib_b_path = tmp_path / "lib_b"
-    config_b = Config()
-    config_b.library.path = str(lib_b_path)
-    lib_b = Library(config_b)
-    lib_b.init()
-    lib_b.add_remote("shared", str(bare))
-    count = lib_b.pull("shared")
-
-    assert count == 1
-    skill = lib_b.info("my-skill")
-    assert skill is not None
-    assert skill.description == "A test skill for unit tests."
+def test_init_repo(repo_mgr):
+    """init_repo creates a local git repo."""
+    backend = repo_mgr.init_repo("my-local")
+    assert repo_mgr.repo_exists("my-local")
+    assert (repo_mgr.repos_dir / "my-local" / ".git").exists()
 
 
-def test_push_pull_multiple_versions(tmp_path, sample_skill):
-    """Push multiple versions, pull gets all of them."""
-    import subprocess
-    from skillm.config import Config
-    from skillm.core import Library
+def test_clone_repo(repo_mgr, bare_repo):
+    """clone_repo clones from a URL."""
+    backend = repo_mgr.clone_repo("cloned", str(bare_repo))
+    assert repo_mgr.repo_exists("cloned")
+    assert (repo_mgr.repos_dir / "cloned" / ".git").exists()
 
-    bare = tmp_path / "shared.git"
-    bare.mkdir()
-    subprocess.run(["git", "init", "--bare", str(bare)], capture_output=True, check=True)
 
-    # Library A: publish two versions
-    lib_a_path = tmp_path / "lib_a"
-    config_a = Config()
-    config_a.library.path = str(lib_a_path)
-    lib_a = Library(config_a)
-    lib_a.init()
-    lib_a.publish(sample_skill)
-    lib_a.publish(sample_skill)
-    lib_a.add_remote("shared", str(bare))
-    lib_a.push("shared")
+def test_clone_repo_duplicate_fails(repo_mgr, bare_repo):
+    """clone_repo raises if repo name already exists."""
+    repo_mgr.clone_repo("dup", str(bare_repo))
+    with pytest.raises(ValueError, match="already exists"):
+        repo_mgr.clone_repo("dup", str(bare_repo))
 
-    # Library B: pull
-    lib_b_path = tmp_path / "lib_b"
-    config_b = Config()
-    config_b.library.path = str(lib_b_path)
-    lib_b = Library(config_b)
-    lib_b.init()
-    lib_b.add_remote("shared", str(bare))
-    lib_b.pull("shared")
 
-    skill = lib_b.info("my-skill")
-    assert skill is not None
-    assert len(skill.versions) == 2
+def test_get_backend(repo_mgr):
+    """get_backend returns a LocalBackend for an existing repo."""
+    repo_mgr.init_repo("test-repo")
+    backend = repo_mgr.get_backend("test-repo")
+    assert backend is not None
+
+
+def test_get_backend_missing_raises(repo_mgr):
+    """get_backend raises for non-existent repo."""
+    with pytest.raises(ValueError, match="not found"):
+        repo_mgr.get_backend("ghost")
+
+
+def test_remove_repo(repo_mgr):
+    """remove_repo deletes the repo directory."""
+    repo_mgr.init_repo("disposable")
+    assert repo_mgr.repo_exists("disposable")
+    repo_mgr.remove_repo("disposable")
+    assert not repo_mgr.repo_exists("disposable")
+
+
+def test_list_repos_empty(repo_mgr):
+    """list_repos returns empty list when no repos exist."""
+    assert repo_mgr.list_repos() == []
+
+
+def test_list_repos(repo_mgr):
+    """list_repos returns all initialized repos."""
+    repo_mgr.init_repo("alpha")
+    repo_mgr.init_repo("beta")
+    repos = repo_mgr.list_repos()
+    names = [r.name for r in repos]
+    assert "alpha" in names
+    assert "beta" in names
+    assert len(repos) == 2
+
+
+def test_repo_exists(repo_mgr):
+    """repo_exists returns True for existing repos, False otherwise."""
+    assert not repo_mgr.repo_exists("nope")
+    repo_mgr.init_repo("yes")
+    assert repo_mgr.repo_exists("yes")
+
+
+def test_get_all_backends(repo_mgr):
+    """get_all_backends returns (name, backend) pairs for all repos."""
+    repo_mgr.init_repo("one")
+    repo_mgr.init_repo("two")
+    all_backends = repo_mgr.get_all_backends()
+    names = [name for name, _ in all_backends]
+    assert "one" in names
+    assert "two" in names
+    assert len(all_backends) == 2
+
+
+def test_list_repos_shows_origin_url(repo_mgr, bare_repo):
+    """Cloned repos show their origin URL in list_repos."""
+    repo_mgr.clone_repo("from-remote", str(bare_repo))
+    repos = repo_mgr.list_repos()
+    assert len(repos) == 1
+    assert repos[0].name == "from-remote"
+    assert str(bare_repo) in repos[0].url
+
+
+def test_init_repo_no_origin_url(repo_mgr):
+    """Local-only repos have empty origin URL."""
+    repo_mgr.init_repo("local-only")
+    repos = repo_mgr.list_repos()
+    assert len(repos) == 1
+    assert repos[0].url == ""
