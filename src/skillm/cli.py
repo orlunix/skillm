@@ -395,34 +395,34 @@ def push_cmd(remote_name: str | None, as_branch: str | None):
 
 @cli.command("pull")
 @click.argument("remote_name", required=False, default=None)
-@click.option("--library", "library_name", default=None, help="Pull specific library (branch)")
-@click.option("--as", "as_name", default=None, help="Local name for the library (if name conflict)")
-def pull_cmd(remote_name: str | None, library_name: str | None, as_name: str | None):
+@click.option("--branch", "branch_name", default=None, help="Pull specific remote branch")
+@click.option("--as", "as_name", default=None, help="Local library name (if name conflict)")
+def pull_cmd(remote_name: str | None, branch_name: str | None, as_name: str | None):
     """Pull from a git remote and rebuild the index.
 
     \b
     If REMOTE_NAME is omitted, pulls from the tracked remote.
-    Use --library to pull a specific remote library.
+    Use --branch to pull a specific remote branch.
     Use --as to rename when there's a local name conflict.
     """
     lib = _get_library()
 
     try:
-        if library_name:
-            # Selective library pull: fetch specific branch
+        if branch_name:
+            # Selective pull: fetch specific remote branch
             remote = remote_name or "origin"
-            local_name = as_name or library_name
+            local_name = as_name or branch_name
             git = lib.backend.git
 
             # Fetch the specific branch
-            git._run("fetch", remote, f"{library_name}:refs/remotes/{remote}/{library_name}")
+            git._run("fetch", remote, f"{branch_name}:refs/remotes/{remote}/{branch_name}")
 
             # Create local branch if it doesn't exist
             if not git.branch_exists(local_name):
-                git._run("branch", "--track", local_name, f"{remote}/{library_name}")
-                console.print(f"[green]Created library '{local_name}' tracking {remote}/{library_name}[/green]")
+                git._run("branch", "--track", local_name, f"{remote}/{branch_name}")
+                console.print(f"[green]Created library '{local_name}' tracking {remote}/{branch_name}[/green]")
             else:
-                console.print(f"[green]Updated library '{local_name}' from {remote}/{library_name}[/green]")
+                console.print(f"[green]Updated library '{local_name}' from {remote}/{branch_name}[/green]")
 
             # Rebuild to index new tags
             count = lib.rebuild()

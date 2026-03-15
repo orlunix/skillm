@@ -43,7 +43,7 @@ Requires Python 3.10+.
 skillm remote add team ssh://git@server/team-skills.git
 
 # Pull the infra library
-skillm pull team --library infra
+skillm pull team --branch infra
 
 # Install a skill into your project
 cd your-project/
@@ -327,7 +327,7 @@ Found "deploy" in multiple libraries:
 Select: _
 ```
 
-Or specify explicitly: `skillm install deploy --library infra`
+Or specify explicitly: `skillm install deploy --branch infra`
 
 **Manage project skills:**
 
@@ -385,9 +385,9 @@ skillm remote rm old-server                            # remove a remote
 **Pull libraries from a remote:**
 
 ```bash
-skillm pull team --library infra              # pull a specific library
-skillm pull team --library infra,ai           # pull multiple
-skillm pull team --library infra --as team-infra  # rename if local conflict
+skillm pull team --branch infra              # pull a specific library
+skillm pull team --branch infra,ai           # pull multiple
+skillm pull team --branch infra --as team-infra  # rename if local conflict
 skillm pull                                   # pull from tracked remote
 ```
 
@@ -618,7 +618,7 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 
 | Command | Description |
 |---------|-------------|
-| `skillm install <name[@ver]> [--pin] [--library LIB]` | Install skill into project |
+| `skillm install <name[@ver]> [--pin]` | Install skill into project |
 | `skillm uninstall <name>` | Remove skill from project |
 | `skillm sync` | Install all missing skills from skills.json |
 | `skillm upgrade [name]` | Update to latest library versions |
@@ -642,7 +642,7 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 | `skillm remote list` | List all remotes |
 | `skillm remote switch <name>` | Set default remote |
 | `skillm push [remote] [--as BRANCH]` | Push current library to remote |
-| `skillm pull [remote] [--library NAME] [--as LOCAL]` | Pull library from remote |
+| `skillm pull [remote] [--branch NAME] [--as LOCAL]` | Pull remote branch as local library |
 
 ## License
 

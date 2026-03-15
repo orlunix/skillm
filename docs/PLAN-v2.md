@@ -103,7 +103,7 @@ skillm search deploy
 
 # Install from specific library (when skill name exists in multiple)
 skillm install deploy-k8s                  # unique name, auto-resolve
-skillm install deploy --library infra      # ambiguous, specify library
+skillm install deploy --branch infra      # ambiguous, specify library
 
 # Ambiguous name → interactive selection
 skillm install deploy
@@ -119,11 +119,11 @@ Pull is selective — user specifies which remote libraries to pull:
 
 ```bash
 # Pull specific libraries from a remote
-skillm pull origin --library infra
-skillm pull origin --library infra,ai
+skillm pull origin --branch infra
+skillm pull origin --branch infra,ai
 
 # Name conflict: remote "infra" but local "infra" already tracks another remote
-skillm pull team --library infra --as team-infra
+skillm pull team --branch infra --as team-infra
 ```
 
 ### Push workflow
@@ -186,7 +186,7 @@ $ skillm library list
 - [x] Delete `backends/ssh.py`
 - [x] 113 tests pass
 
-> **Note:** Phase 3 will extend push/pull with per-library `--library`,
+> **Note:** Phase 3 will extend push/pull with per-branch `--branch`,
 > `--as`, and three-level tags. The current implementation is a working
 > foundation that will be adapted, not replaced.
 
@@ -230,13 +230,13 @@ on the three-level tag format. Migrate tags before building on top of them.
 
 - [ ] `skillm search` scans tags from all libraries (parse tag prefix)
 - [ ] `skillm install <name>` → unique match: auto-install; ambiguous: interactive selection
-- [ ] `skillm install <name> --library <lib>` → explicit library selection
+- [ ] `skillm install <name>` with qualified name `library/skill` for explicit selection
 
-**Pull — selective library subscription:**
+**Pull — selective branch subscription:**
 
-- [ ] `skillm pull <remote> --library <name>` → fetch specific remote branch + track
-- [ ] `skillm pull <remote> --library <name> --as <local-name>` → rename on conflict
-- [ ] Pull multiple: `--library infra,ai`
+- [ ] `skillm pull <remote> --branch <name>` → fetch specific remote branch + track
+- [ ] `skillm pull <remote> --branch <name> --as <local-name>` → rename on conflict
+- [ ] Pull multiple: `--branch infra,ai`
 
 **Push:**
 
@@ -251,7 +251,7 @@ on the three-level tag format. Migrate tags before building on top of them.
 - [ ] Test: three-level tags created correctly on add
 - [ ] Test: create two libraries, add same-name skill to each, search finds both
 - [ ] Test: install from non-active library works without switching
-- [ ] Test: ambiguous install triggers selection (or `--library` resolves)
+- [ ] Test: ambiguous install triggers selection (or qualified name resolves)
 - [ ] Test: pull specific library from remote, verify local branch + tracking
 - [ ] Test: pull with `--as` rename, verify tracking is correct
 - [ ] Test: push sets up tracking for untracked library
@@ -412,8 +412,8 @@ Language package deps use their ecosystem's native format.
 | `remote add <name> <url>` | `git remote add` |
 | `remote rm <name>` | `git remote remove` |
 | `remote list` | `git remote -v` |
-| `pull <remote> --library <name>` | `git fetch <remote> <branch>` + track |
-| `pull <remote> --library <name> --as <local>` | fetch + create local branch with different name |
+| `pull <remote> --branch <name>` | `git fetch <remote> <branch>` + track |
+| `pull <remote> --branch <name> --as <local>` | fetch + create local branch with different name |
 | `push` | `git push <tracked-remote> <branch> --tags` |
 | `push <remote>` | `git push -u <remote> <branch> --tags` |
 | `push <remote> --as <branch>` | `git push <remote> local:branch --tags` |
