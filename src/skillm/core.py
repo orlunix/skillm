@@ -547,9 +547,10 @@ class Library:
     # ── Repo operations ──────────────────────────────────────
 
     def add_repo(self, name: str, url: str) -> None:
-        """Clone a remote URL as a named repo. Auto-switches to it."""
+        """Clone a remote URL as a named repo. Auto-switches to it and indexes skills."""
         self.repo_mgr.clone_repo(name, url)
         self.switch_repo(name)
+        self.rebuild()
 
     def init_repo(self, name: str) -> None:
         """Create a local-only repo (no remote)."""
