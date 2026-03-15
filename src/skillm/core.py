@@ -395,32 +395,44 @@ class Library:
             self.db.update_skill(skill)
         return True
 
-    def find_skills_by_tag(self, tag: str) -> list[tuple[str, "SkillMeta"]]:
-        """Find all skills on the current branch that have a given tag.
+    def _get_scan_backends(self, repo: str | None = None) -> list[tuple[str, "LocalBackend"]]:
+        """Get backends to scan. If repo is specified, just that one; otherwise all."""
+        if repo:
+            if not self.repo_mgr.repo_exists(repo):
+                raise ValueError(f"Repo '{repo}' not found")
+            return [(repo, self.repo_mgr.get_backend(repo))]
+        return self.repo_mgr.get_all_backends()
 
-        Scans SKILL.md frontmatter in the working tree.
+    def find_skills_by_tag(self, tag: str, repo: str | None = None) -> list[tuple[str, "SkillMeta"]]:
+        """Find all skills that have a given tag.
+
+        Scans SKILL.md frontmatter in working trees.
+        If repo is specified, only scans that repo; otherwise scans all repos.
         Returns list of (skill_name, SkillMeta).
         """
         from .metadata import scan_skill_dirs
         tag = tag.strip().lower()
         results = []
-        for name, meta in scan_skill_dirs(self.backend.skills_dir):
-            if tag in [t.lower() for t in meta.tags]:
-                results.append((name, meta))
+        for repo_name, backend in self._get_scan_backends(repo):
+            for name, meta in scan_skill_dirs(backend.skills_dir):
+                if tag in [t.lower() for t in meta.tags]:
+                    results.append((name, meta))
         return results
 
-    def find_skills_by_category(self, category: str) -> list[tuple[str, "SkillMeta"]]:
-        """Find all skills on the current branch that match a category.
+    def find_skills_by_category(self, category: str, repo: str | None = None) -> list[tuple[str, "SkillMeta"]]:
+        """Find all skills that match a category.
 
-        Scans SKILL.md frontmatter in the working tree.
+        Scans SKILL.md frontmatter in working trees.
+        If repo is specified, only scans that repo; otherwise scans all repos.
         Returns list of (skill_name, SkillMeta).
         """
         from .metadata import scan_skill_dirs
         category = category.strip().lower()
         results = []
-        for name, meta in scan_skill_dirs(self.backend.skills_dir):
-            if (meta.category or "").lower() == category:
-                results.append((name, meta))
+        for repo_name, backend in self._get_scan_backends(repo):
+            for name, meta in scan_skill_dirs(backend.skills_dir):
+                if (meta.category or "").lower() == category:
+                    results.append((name, meta))
         return results
 
     def stats(self) -> dict:

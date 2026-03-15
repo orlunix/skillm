@@ -577,9 +577,10 @@ _root_option = click.option("--project-root", "-r", default=None,
 @click.option("--hard", is_flag=True, help="Copy files instead of symlinking (frozen snapshot)")
 @click.option("--tag", "install_tag", default=None, help="Install all skills matching a tag")
 @click.option("-c", "--category", "install_category", default=None, help="Install all skills matching a category")
+@click.option("--repo", default=None, help="Install from a specific repo (default: all repos)")
 @_agent_option
 @_root_option
-def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None, install_category: str | None, agent: str, project_root: str | None):
+def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None, install_category: str | None, repo: str | None, agent: str, project_root: str | None):
     """Install skills from the library into this project.
 
     Default is soft install (symlink to library, always latest).
@@ -588,7 +589,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
     skillm install deploy-k8s              Symlink to library (default, soft)
     skillm install deploy-k8s --hard       Copy files into project (frozen)
     skillm install --tag k8s               Symlink all skills tagged 'k8s'
-    skillm install --tag k8s --hard        Copy all matching skills
+    skillm install --tag k8s --repo team   Install from specific repo
     skillm install -c infra                Install all skills in category
     """
     from .check import check_requirements
@@ -600,7 +601,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
     mode = "hard" if hard else "soft"
 
     if install_tag:
-        matches = lib.find_skills_by_tag(install_tag)
+        matches = lib.find_skills_by_tag(install_tag, repo=repo)
         if not matches:
             console.print(f"[dim]No skills found with tag '{install_tag}'[/dim]")
             return
@@ -615,7 +616,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
         return
 
     if install_category:
-        matches = lib.find_skills_by_category(install_category)
+        matches = lib.find_skills_by_category(install_category, repo=repo)
         if not matches:
             console.print(f"[dim]No skills found in category '{install_category}'[/dim]")
             return
