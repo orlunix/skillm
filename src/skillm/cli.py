@@ -243,7 +243,10 @@ def push_cmd(repo_name: str | None, as_branch: str | None):
     except Exception as e:
         msg = str(e)
         console.print(f"[red]Push failed: {msg}[/red]")
-        if "protected" in msg.lower() or "denied" in msg.lower() or "rejected" in msg.lower():
+        lower = msg.lower()
+        if "fetch first" in lower or "non-fast-forward" in lower or "not have locally" in lower:
+            console.print("[dim]Tip: run 'skillm pull' first to merge remote changes, then push again.[/dim]")
+        elif "protected" in lower or "denied" in lower:
             console.print("[dim]Tip: push to a new branch with: skillm push -b <branch-name>[/dim]")
 
 
@@ -282,7 +285,10 @@ def pull_cmd(repo_name: str | None, branch_name: str | None):
             count = lib.pull(repo_name)
             console.print(f"[green]Pulled repo '{target}' — {count} version(s) indexed[/green]")
     except Exception as e:
-        console.print(f"[red]Pull failed: {e}[/red]")
+        msg = str(e)
+        console.print(f"[red]Pull failed: {msg}[/red]")
+        if "conflict" in msg.lower() or "merge" in msg.lower():
+            console.print(f"[dim]Tip: resolve conflicts in ~/.skillm/repos/{target}/ then run 'skillm push'[/dim]")
 
 
 # ── Skill Operations ───────────────────────────────────────

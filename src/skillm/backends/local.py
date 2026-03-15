@@ -213,8 +213,20 @@ class LocalBackend(LibraryBackend):
             return self._git.push("origin", include_tags=True)
 
     def git_pull(self) -> None:
-        """Fetch all commits and tags from origin."""
+        """Pull from origin (fetch + merge)."""
         self._git.fetch("origin")
+        branch = self._current_library()
+        # Merge remote branch into local (if remote tracking exists)
+        result = self._git._run(
+            "merge", f"origin/{branch}",
+            check=False,
+        )
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            # Ignore if remote branch doesn't exist (local-only repo)
+            if "not something we can merge" not in stderr and "refusing to merge" not in stderr:
+                from ..git import GitError
+                raise GitError(f"merge failed: {stderr}")
         # Clear cache since tags may have changed
         if self._cache_dir.exists():
             shutil.rmtree(self._cache_dir)
