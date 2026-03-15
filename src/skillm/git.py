@@ -9,10 +9,8 @@ import re
 import subprocess
 from pathlib import Path
 
-# Two-level: skill/vMAJOR.MINOR (legacy)
-_VERSION_TAG_RE_2 = re.compile(r"^([^/]+)/v(\d+)\.(\d+)$")
 # Three-level: library/skill/vMAJOR.MINOR
-_VERSION_TAG_RE_3 = re.compile(r"^([^/]+)/([^/]+)/v(\d+)\.(\d+)$")
+_VERSION_TAG_RE = re.compile(r"^([^/]+)/([^/]+)/v(\d+)\.(\d+)$")
 
 
 class GitError(Exception):
@@ -312,35 +310,24 @@ class GitRepo:
     # ── Version helpers (three-level tags) ──────────────────
 
     def skill_versions(
-        self, skill_name: str, library: str | None = None,
+        self, skill_name: str, library: str,
     ) -> list[tuple[str, int, int]]:
-        """Get all versions for a skill from tags.
-
-        If library is given, looks for three-level tags: library/skill/vX.Y
-        Otherwise, looks for two-level tags: skill/vX.Y (legacy compat).
+        """Get all versions for a skill from three-level tags: library/skill/vX.Y.
 
         Returns list of (tag_name, major, minor) sorted by version.
         """
-        if library:
-            tags = self.list_tags(f"{library}/{skill_name}/v*")
-            versions = []
-            for t in tags:
-                m = _VERSION_TAG_RE_3.match(t)
-                if m and m.group(1) == library and m.group(2) == skill_name:
-                    versions.append((t, int(m.group(3)), int(m.group(4))))
-        else:
-            tags = self.list_tags(f"{skill_name}/v*")
-            versions = []
-            for t in tags:
-                m = _VERSION_TAG_RE_2.match(t)
-                if m and m.group(1) == skill_name:
-                    versions.append((t, int(m.group(2)), int(m.group(3))))
+        tags = self.list_tags(f"{library}/{skill_name}/v*")
+        versions = []
+        for t in tags:
+            m = _VERSION_TAG_RE.match(t)
+            if m and m.group(1) == library and m.group(2) == skill_name:
+                versions.append((t, int(m.group(3)), int(m.group(4))))
 
         versions.sort(key=lambda x: (x[1], x[2]))
         return versions
 
     def next_version(
-        self, skill_name: str, library: str | None = None, major: bool = False,
+        self, skill_name: str, library: str, major: bool = False,
     ) -> str:
         """Compute the next version string for a skill."""
         versions = self.skill_versions(skill_name, library=library)
@@ -353,23 +340,16 @@ class GitRepo:
         return f"v{max_maj}.{max_min + 1}"
 
     def parse_all_tags(self) -> list[tuple[str, str, str]]:
-        """Parse all version tags in the repo.
+        """Parse all three-level version tags in the repo.
 
         Returns list of (library, skill_name, version) tuples.
-        Handles both three-level (library/skill/vX.Y) and
-        two-level (skill/vX.Y, treated as library='main') tags.
         """
         all_tags = self.list_tags()
         result = []
         for t in all_tags:
-            m = _VERSION_TAG_RE_3.match(t)
+            m = _VERSION_TAG_RE.match(t)
             if m:
                 result.append((m.group(1), m.group(2), f"v{m.group(3)}.{m.group(4)}"))
-                continue
-            m = _VERSION_TAG_RE_2.match(t)
-            if m:
-                # Legacy two-level tag → treat as library "main"
-                result.append(("main", m.group(1), f"v{m.group(2)}.{m.group(3)}"))
         return result
 
     def list_skill_dirs(self) -> list[str]:

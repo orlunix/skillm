@@ -47,16 +47,17 @@ def test_skill_versions(tmp_path):
     repo.add("file.txt")
     repo.commit("initial")
 
-    repo.tag("my-skill/v0.1")
-    repo.tag("my-skill/v0.2")
-    repo.tag("my-skill/v1.0")
-    repo.tag("other/v1.0")
+    # Three-level tags: library/skill/version
+    repo.tag("infra/my-skill/v0.1")
+    repo.tag("infra/my-skill/v0.2")
+    repo.tag("infra/my-skill/v1.0")
+    repo.tag("infra/other/v1.0")
 
-    versions = repo.skill_versions("my-skill")
+    versions = repo.skill_versions("my-skill", library="infra")
     assert len(versions) == 3
-    assert versions[0] == ("my-skill/v0.1", 0, 1)
-    assert versions[1] == ("my-skill/v0.2", 0, 2)
-    assert versions[2] == ("my-skill/v1.0", 1, 0)
+    assert versions[0] == ("infra/my-skill/v0.1", 0, 1)
+    assert versions[1] == ("infra/my-skill/v0.2", 0, 2)
+    assert versions[2] == ("infra/my-skill/v1.0", 1, 0)
 
 
 def test_next_version(tmp_path):
@@ -67,14 +68,14 @@ def test_next_version(tmp_path):
     repo.commit("initial")
 
     # No tags yet
-    assert repo.next_version("my-skill") == "v0.1"
-    assert repo.next_version("my-skill", major=True) == "v1.0"
+    assert repo.next_version("my-skill", library="infra") == "v0.1"
+    assert repo.next_version("my-skill", library="infra", major=True) == "v1.0"
 
-    repo.tag("my-skill/v0.1")
-    assert repo.next_version("my-skill") == "v0.2"
+    repo.tag("infra/my-skill/v0.1")
+    assert repo.next_version("my-skill", library="infra") == "v0.2"
 
-    repo.tag("my-skill/v0.2")
-    assert repo.next_version("my-skill", major=True) == "v1.0"
+    repo.tag("infra/my-skill/v0.2")
+    assert repo.next_version("my-skill", library="infra", major=True) == "v1.0"
 
 
 def test_has_changes(tmp_path):

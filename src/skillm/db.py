@@ -77,7 +77,7 @@ class Database:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.conn.executescript(SCHEMA)
         self.conn.execute(
-            "INSERT OR IGNORE INTO library_meta(key, value) VALUES('schema_version', '1')"
+            "INSERT OR IGNORE INTO library_meta(key, value) VALUES('schema_version', '2')"
         )
         self.conn.commit()
 
