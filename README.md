@@ -253,11 +253,11 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 
 | Command | Description |
 |---------|-------------|
-| `skillm install <name>` | Copy skill into project (hard install) |
-| `skillm install <name> --soft` | Symlink to library (always latest) |
+| `skillm install <name>` | Symlink to library (default, soft) |
+| `skillm install <name> --hard` | Copy files into project (frozen snapshot) |
 | `skillm install --tag <tag>` | Install all skills matching a tag |
 | `skillm install -c <category>` | Install all skills matching a category |
-| `skillm install --tag <tag> --soft` | Symlink all matching skills |
+| `skillm install --tag <tag> --hard` | Copy all matching skills |
 | `skillm uninstall <name>` | Remove skill from project |
 | `skillm sync` | Install missing skills from skills.json |
 | `skillm upgrade [name]` | Update to latest library versions |
@@ -266,10 +266,10 @@ All project commands accept `--agent/-a` (claude, cursor, codex, openclaw) and `
 | `skillm enable <name>` | Enable a skill in project |
 | `skillm disable <name>` | Disable a skill in project |
 
-**Hard vs soft install:**
+**Soft vs hard install:**
 
-- **Hard** (default) — copies files into the project. Frozen snapshot, won't change until you `upgrade`.
-- **Soft** (`--soft`) — symlinks to the library working tree. Always reflects the latest state. Changes in the library appear immediately in the project.
+- **Soft** (default) — symlinks to the library working tree. Always reflects the latest state. Changes in the library appear immediately in the project.
+- **Hard** (`--hard`) — copies files into the project. Frozen snapshot, won't change until you `upgrade`.
 
 ### Branch Management
 

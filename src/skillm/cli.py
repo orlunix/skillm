@@ -574,19 +574,21 @@ _root_option = click.option("--project-root", "-r", default=None,
 @cli.command("install")
 @click.argument("name", required=False, default=None)
 @click.option("--pin", is_flag=True, help="Pin to this version")
-@click.option("--soft", is_flag=True, help="Symlink to library (always latest)")
+@click.option("--hard", is_flag=True, help="Copy files instead of symlinking (frozen snapshot)")
 @click.option("--tag", "install_tag", default=None, help="Install all skills matching a tag")
 @click.option("-c", "--category", "install_category", default=None, help="Install all skills matching a category")
 @_agent_option
 @_root_option
-def install_cmd(name: str | None, pin: bool, soft: bool, install_tag: str | None, install_category: str | None, agent: str, project_root: str | None):
+def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None, install_category: str | None, agent: str, project_root: str | None):
     """Install skills from the library into this project.
 
+    Default is soft install (symlink to library, always latest).
+
     \b
-    skillm install deploy-k8s              Copy skill into project (hard)
-    skillm install deploy-k8s --soft       Symlink to library (always latest)
-    skillm install --tag k8s               Install all skills tagged 'k8s'
-    skillm install --tag k8s --soft        Symlink all matching skills
+    skillm install deploy-k8s              Symlink to library (default, soft)
+    skillm install deploy-k8s --hard       Copy files into project (frozen)
+    skillm install --tag k8s               Symlink all skills tagged 'k8s'
+    skillm install --tag k8s --hard        Copy all matching skills
     skillm install -c infra                Install all skills in category
     """
     from .check import check_requirements
@@ -594,7 +596,8 @@ def install_cmd(name: str | None, pin: bool, soft: bool, install_tag: str | None
 
     project = _get_project(agent=agent, project_root=project_root)
     lib = project.library
-    mode = "soft" if soft else "hard"
+    soft = not hard
+    mode = "hard" if hard else "soft"
 
     if install_tag:
         matches = lib.find_skills_by_tag(install_tag)
