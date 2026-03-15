@@ -278,9 +278,9 @@ def pull_cmd(repo_name: str | None, branch_name: str | None):
 
             git.switch_branch(branch_name)
 
-            # Rebuild to index new tags
-            count = lib.rebuild()
-            console.print(f"[green]{count} version(s) indexed[/green]")
+            # Fetch + merge + rebuild via standard pull path
+            count = lib.pull(repo_name)
+            console.print(f"[green]Pulled branch '{branch_name}' — {count} version(s) indexed[/green]")
         else:
             count = lib.pull(repo_name)
             console.print(f"[green]Pulled repo '{target}' — {count} version(s) indexed[/green]")
