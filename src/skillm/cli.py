@@ -142,9 +142,12 @@ def repo_add(name: str, url: str):
 
     \b
     URL can be anything git understands:
-      /shared/skills                    Local path
-      git@github.com:team/skills.git    SSH
-      https://github.com/team/skills    HTTPS
+      https://oauth2:TOKEN@gitlab.com/team/skills.git   HTTPS with token
+      git@github.com:team/skills.git                    SSH
+      /shared/skills                                    Local path
+
+    Tip: use 'git config --global credential.helper store'
+    to avoid embedding tokens in URLs.
     """
     lib = _get_library()
     try:

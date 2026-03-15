@@ -37,8 +37,8 @@ Requires Python 3.10+.
 ### 1. Pull a team repo and install a skill
 
 ```bash
-# Clone the team's skill repo
-skillm repo add team ssh://git@server/team-skills.git
+# Clone the team's skill repo (one-time)
+skillm repo add team https://oauth2:<TOKEN>@gitlab.example.com/team/skills.git
 
 # Browse what's available
 skillm list
@@ -50,6 +50,25 @@ skillm install deploy-k8s
 ```
 
 That's it. The local repo is auto-created on first use. `install` auto-creates the agent directory.
+
+**URL formats** — anything git understands:
+
+```bash
+# HTTPS with token (GitLab, GitHub)
+skillm repo add team https://oauth2:<TOKEN>@gitlab.example.com/team/skills.git
+
+# SSH
+skillm repo add team git@github.com:team/skills.git
+
+# Local path
+skillm repo add shared /home/shared/skills
+```
+
+**Tip:** To avoid embedding tokens in URLs, configure git credential storage:
+
+```bash
+git config --global credential.helper store
+```
 
 ### 2. Create and publish your own skills
 
