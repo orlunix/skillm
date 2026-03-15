@@ -41,9 +41,10 @@ class RepoManager:
         if repo_path.exists():
             raise ValueError(f"Repo '{name}' already exists at {repo_path}")
         self.repos_dir.mkdir(parents=True, exist_ok=True)
+        from .git import _clean_env
         result = subprocess.run(
             ["git", "clone", url, str(repo_path)],
-            capture_output=True, text=True,
+            capture_output=True, text=True, env=_clean_env(),
         )
         if result.returncode != 0:
             raise GitError(f"clone failed: {(result.stderr or '').strip()}")
@@ -95,9 +96,10 @@ class RepoManager:
     def _get_origin_url(self, repo_path: Path) -> str:
         """Get the origin remote URL for a repo, or empty string."""
         try:
+            from .git import _clean_env
             result = subprocess.run(
                 ["git", "-C", str(repo_path), "remote", "get-url", "origin"],
-                capture_output=True, text=True,
+                capture_output=True, text=True, env=_clean_env(),
             )
             if result.returncode == 0:
                 return result.stdout.strip()

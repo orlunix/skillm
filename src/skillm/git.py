@@ -5,9 +5,28 @@ All git operations go through this module. Users never touch git directly.
 
 from __future__ import annotations
 
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
+
+
+def _clean_env() -> dict[str, str]:
+    """Get a clean environment for subprocess calls.
+
+    PyInstaller sets LD_LIBRARY_PATH to its bundled libs, which can
+    conflict with system libraries used by git. Strip it out.
+    """
+    env = os.environ.copy()
+    # PyInstaller stashes the original LD_LIBRARY_PATH in LD_LIBRARY_PATH_ORIG
+    if getattr(sys, "frozen", False):
+        orig = env.get("LD_LIBRARY_PATH_ORIG")
+        if orig is not None:
+            env["LD_LIBRARY_PATH"] = orig
+        else:
+            env.pop("LD_LIBRARY_PATH", None)
+    return env
 
 # Three-level: library/skill/vMAJOR.MINOR
 _VERSION_TAG_RE = re.compile(r"^([^/]+)/([^/]+)/v(\d+)\.(\d+)$")
@@ -37,6 +56,7 @@ class GitRepo:
                 capture_output=capture,
                 text=True,
                 check=check,
+                env=_clean_env(),
             )
         except subprocess.CalledProcessError as e:
             raise GitError(
@@ -242,7 +262,7 @@ class GitRepo:
     def show_file(self, ref: str, path: str) -> bytes:
         """Get file contents at a specific ref."""
         cmd = ["git", "-C", str(self.path), "show", f"{ref}:{path}"]
-        result = subprocess.run(cmd, capture_output=True, check=True)
+        result = subprocess.run(cmd, capture_output=True, check=True, env=_clean_env())
         return result.stdout
 
     def list_files(self, ref: str, path: str = "") -> list[str]:

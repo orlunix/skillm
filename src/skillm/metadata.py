@@ -270,13 +270,15 @@ def detect_source(source_dir: Path) -> str:
     import socket
     import subprocess
 
+    from .git import _clean_env
+
     source_dir = source_dir.resolve()
 
     # Try git: get remote origin URL
     try:
         result = subprocess.run(
             ["git", "-C", str(source_dir), "remote", "get-url", "origin"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=_clean_env(),
         )
         if result.returncode == 0 and result.stdout.strip():
             return f"git:{result.stdout.strip()}"
@@ -287,7 +289,7 @@ def detect_source(source_dir: Path) -> str:
     try:
         result = subprocess.run(
             ["p4", "where", str(source_dir / "...")],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=_clean_env(),
         )
         if result.returncode == 0 and result.stdout.strip():
             # p4 where outputs: //depot/path/... //client/path/... /local/path/...
@@ -310,10 +312,12 @@ def _git_author() -> str:
     """Try to get author name from git config."""
     import subprocess
 
+    from .git import _clean_env
+
     try:
         result = subprocess.run(
             ["git", "config", "user.name"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=5, env=_clean_env(),
         )
         return result.stdout.strip() if result.returncode == 0 else ""
     except (FileNotFoundError, subprocess.TimeoutExpired):
