@@ -41,13 +41,16 @@ skillm info tree-setup           # skill details
 
 ## Contributing a Skill
 
+Skills follow the [Agent Skills specification](https://agentskills.io/specification).
+
 1. Create a skill directory with a `SKILL.md`:
 
 ```
 my-skill/
-├── SKILL.md              # Required
-├── scripts/              # Optional
-└── templates/            # Optional
+├── SKILL.md              # Required — metadata + instructions
+├── scripts/              # Optional — executable code
+├── references/           # Optional — documentation
+├── assets/               # Optional — templates, resources
 ```
 
 2. Write the `SKILL.md`:
@@ -55,12 +58,12 @@ my-skill/
 ```yaml
 ---
 name: my-skill
-description: Short description of what this skill does
-tags: [relevant, tags]
-author: your-name
-requires:
-  tools: [python3]
-  env: [P4PORT]
+description: Short description of what this skill does and when to use it.
+compatibility: Requires python3 and P4PORT environment variable
+metadata:
+  author: your-name
+  tags: relevant, tags
+  category: infra
 ---
 
 # My Skill

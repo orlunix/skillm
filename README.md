@@ -158,33 +158,36 @@ Two levels: **active repo** + **active branch** (git HEAD per repo).
 
 ## What is a Skill?
 
-A skill is a directory with a `SKILL.md` file:
+A skill is a directory with a `SKILL.md` file. Format follows the [Agent Skills specification](https://agentskills.io/specification).
 
 ```
 my-skill/
-├── SKILL.md              # Required — agent instructions
-├── scripts/              # Optional — helper scripts
-├── requirements.txt      # Optional — Python package deps
-└── templates/            # Optional — file templates
+├── SKILL.md              # Required — metadata + instructions
+├── scripts/              # Optional — executable code
+├── references/           # Optional — documentation
+├── assets/               # Optional — templates, resources
+└── ...
 ```
 
-### SKILL.md Frontmatter
+### SKILL.md Format
 
-**Basic fields:**
+**Standard fields** ([agentskills.io spec](https://agentskills.io/specification)):
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Lowercase letters, numbers, hyphens. Max 64 chars. Must match directory name. |
+| `description` | Yes | What the skill does and when to use it. Max 1024 chars. |
+| `license` | No | License name or reference to a bundled license file. |
+| `compatibility` | No | Environment requirements (tools, network, etc). Max 500 chars. |
+| `metadata` | No | Arbitrary key-value map for additional properties. |
+| `allowed-tools` | No | Space-delimited list of pre-approved tools. (Experimental) |
+
+**Minimal example:**
 
 ```yaml
 ---
 name: web-scraper
-description: Scrape and parse websites
-author: alice
-tags: [web, scraping, python]
-category: devops
-source: git:https://github.com/team/skills.git     # or ssh://git@server/repo.git
-                                                     # or myhost:/home/user/skills
-requires:
-  tools: [python3, curl, jq]       # CLI binaries (checked via `which`)
-  env: [API_KEY, DATABASE_URL]      # environment variables
-  skills: [git-workflow]            # other skill dependencies
+description: Scrape and parse websites. Use when extracting data from web pages.
 ---
 
 # Web Scraper
@@ -192,7 +195,28 @@ requires:
 Instructions for the agent go here...
 ```
 
-**`source` formats:**
+**Full example with metadata:**
+
+```yaml
+---
+name: deploy-k8s
+description: Deploy services to Kubernetes clusters. Use for k8s deployments and rollbacks.
+license: Apache-2.0
+compatibility: Requires kubectl, helm, and cluster access
+allowed-tools: Bash(kubectl:*) Bash(helm:*) Read Grep
+metadata:
+  author: alice
+  tags: devops, kubernetes, deploy
+  category: infra
+  source: git:https://github.com/team/skills.git
+  argument-hint: "<bundle_id>"
+  disable-model-invocation: "false"
+  requires-tools: python3, curl, jq
+  requires-env: KUBECONFIG, CLUSTER_NAME
+---
+```
+
+**`metadata.source` formats:**
 
 | Origin | Format |
 |--------|--------|
@@ -200,20 +224,6 @@ Instructions for the agent go here...
 | SSH | `git:ssh://git@server/repo.git` |
 | Perforce | `p4://depot/path/to/skill` |
 | Local path | `hostname:/absolute/path/to/skill` |
-
-**Advanced options** — control agent behavior when using this skill:
-
-```yaml
----
-name: deploy-k8s
-description: Deploy services to Kubernetes
-disable-model-invocation: false        # allow/disallow LLM calls within skill
-argument-hint: "<bundle_id>"           # hint shown to user for required input
-allowed-tools: [Bash, Read, Grep, Glob]  # restrict which tools the agent can use
----
-```
-
-All frontmatter fields are optional except the markdown body.
 
 ---
 
