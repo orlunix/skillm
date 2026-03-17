@@ -711,7 +711,9 @@ class Project:
                 backend = self.library.backend
 
             src = backend.get_skill_files(skill_name, version, library=lib_name)
-            if dest.exists():
+            if dest.is_symlink():
+                dest.unlink()
+            elif dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
 

@@ -669,7 +669,11 @@ class TestCLIWorkflows:
         runner.invoke(cli, ["install", "syncable"])
 
         # Delete the files manually
-        shutil.rmtree(project_dir / ".claude" / "skills" / "syncable")
+        dest = project_dir / ".claude" / "skills" / "syncable"
+        if dest.is_symlink():
+            dest.unlink()
+        else:
+            shutil.rmtree(dest)
 
         # Sync
         result = runner.invoke(cli, ["sync"])

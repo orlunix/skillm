@@ -581,19 +581,21 @@ _root_option = click.option("--project-root", "-r", default=None,
 @click.argument("name", required=False, default=None)
 @click.option("--pin", is_flag=True, help="Pin to this version")
 @click.option("--hard", is_flag=True, help="Copy files instead of symlinking (frozen snapshot)")
+@click.option("-g", "--global", "global_install", is_flag=True, help="Install into global agent config (~/.claude/skills/)")
 @click.option("--tag", "install_tag", default=None, help="Install all skills matching a tag")
 @click.option("-c", "--category", "install_category", default=None, help="Install all skills matching a category")
 @click.option("--repo", default=None, help="Install from a specific repo (default: all repos)")
 @_agent_option
 @_root_option
-def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None, install_category: str | None, repo: str | None, agent: str, project_root: str | None):
-    """Install skills from the library into this project.
+def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, install_tag: str | None, install_category: str | None, repo: str | None, agent: str, project_root: str | None):
+    """Install skills from the library into this project (or globally).
 
     Default is soft install (symlink to library, always latest).
 
     \b
     skillm install deploy-k8s              Symlink to library (default, soft)
     skillm install deploy-k8s --hard       Copy files into project (frozen)
+    skillm install deploy-k8s -g           Install globally (~/.claude/skills/)
     skillm install --tag k8s               Symlink all skills tagged 'k8s'
     skillm install --tag k8s --repo team   Install from specific repo
     skillm install -c infra                Install all skills in category
@@ -601,6 +603,9 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
     from .check import check_requirements
     from .metadata import extract_metadata
 
+    if global_install:
+        from pathlib import Path
+        project_root = str(Path.home())
     project = _get_project(agent=agent, project_root=project_root)
     lib = project.library
     soft = not hard
@@ -643,12 +648,14 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
     version = None
     if "@" in name:
         name, version = name.rsplit("@", 1)
+        soft = False  # specific version requires hard install
 
     ver = project.add(name, version=version, pin=pin, soft=soft)
+    scope = "globally" if global_install else "to project"
     if soft:
-        console.print(f"[green]Installed {name} → linked to library[/green]")
+        console.print(f"[green]Installed {name} → linked {scope}[/green]")
     else:
-        console.print(f"[green]Installed {name}@{ver} → {project.skills_dir.relative_to(project.project_dir)}/[/green]")
+        console.print(f"[green]Installed {name}@{ver} → {project.skills_dir}/ ({scope})[/green]")
 
     # Run env check and warn
     skill_dir = project.skills_dir / name
@@ -664,10 +671,14 @@ def install_cmd(name: str | None, pin: bool, hard: bool, install_tag: str | None
 
 @cli.command("uninstall")
 @click.argument("name")
+@click.option("-g", "--global", "global_install", is_flag=True, help="Uninstall from global agent config")
 @_agent_option
 @_root_option
-def uninstall_cmd(name: str, agent: str, project_root: str | None):
-    """Uninstall a skill from this project."""
+def uninstall_cmd(name: str, global_install: bool, agent: str, project_root: str | None):
+    """Uninstall a skill from this project (or globally)."""
+    if global_install:
+        from pathlib import Path
+        project_root = str(Path.home())
     project = _get_project(agent=agent, project_root=project_root)
     if project.drop(name):
         console.print(f"[green]Uninstalled {name}[/green]")
