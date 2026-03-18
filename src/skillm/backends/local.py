@@ -1,9 +1,9 @@
-"""Local filesystem backend with git-backed versioning.
+"""Local filesystem backend with git-backed storage.
 
 Each repo is a separate git clone under ``~/.skillm/repos/<name>/``.
 Skill files live at the root of each repo.
 Each branch is a **library** — a curated collection of skills.
-Versions are three-level git tags: ``library/skill/version``.
+Versions are git commits — no tags needed.
 """
 
 from __future__ import annotations
@@ -16,11 +16,10 @@ from .base import LibraryBackend
 
 
 class LocalBackend(LibraryBackend):
-    """Local filesystem storage backend using git for versioning.
+    """Local filesystem storage backend using git.
 
     Each instance wraps a single git repo (one clone).
     The working tree always reflects the active library (= current branch).
-    Tags use three-level namespace: ``library/skill/version``.
     """
 
     def __init__(self, repo_path: Path):
@@ -38,11 +37,6 @@ class LocalBackend(LibraryBackend):
         """Get the active library name (= current git branch)."""
         return self._git.current_branch()
 
-    def _tag_name(self, name: str, version: str, library: str | None = None) -> str:
-        """Build a three-level tag: library/skill/version."""
-        lib = library or self._current_library()
-        return f"{lib}/{name}/{version}"
-
     def initialize(self) -> None:
         self.repo_path.mkdir(parents=True, exist_ok=True)
         self._cache_dir.mkdir(exist_ok=True)
@@ -55,103 +49,75 @@ class LocalBackend(LibraryBackend):
             self._git.add(".gitignore")
             self._git.commit("skillm: init")
 
-    def get_skill_files(self, name: str, version: str, library: str | None = None) -> Path:
-        tag = self._tag_name(name, version, library)
-        if not self._git.tag_exists(tag):
-            raise FileNotFoundError(f"Skill files not found: {tag}")
-
-        # Extract from git to cache directory
-        lib = library or self._current_library()
-        self._cache_dir.mkdir(exist_ok=True)
-        cache_path = self._cache_dir / lib / name / version
-        if cache_path.exists():
-            shutil.rmtree(cache_path)
-        self._git.extract_to(tag, name, cache_path)
-        return cache_path
-
-    def put_skill_files(self, name: str, version: str, source_dir: Path) -> None:
+    def put_skill(self, name: str, source_dir: Path) -> str:
+        """Copy skill files into the repo and commit. Returns commit hash."""
         dest = self.skills_dir / name
         if dest.exists():
             shutil.rmtree(dest)
         shutil.copytree(source_dir, dest)
 
         self._git.add(name)
-        self._git.commit(f"skillm: {name} {version}")
+        self._git.commit(f"skillm: add {name}")
+        return self._git.head_commit()
 
-        tag = self._tag_name(name, version)
-        if self._git.tag_exists(tag):
-            self._git.delete_tag(tag)
-        self._git.tag(tag, f"{name} {version}")
-
-    def remove_skill_files(self, name: str, version: str | None = None) -> None:
-        lib = self._current_library()
-        if version:
-            tag = self._tag_name(name, version)
-            if self._git.tag_exists(tag):
-                self._git.delete_tag(tag)
-        else:
-            # Remove all version tags for this skill in the current library
-            tags = self._git.list_tags(f"{lib}/{name}/*")
-            for t in tags:
-                self._git.delete_tag(t)
-
-            # Remove from working tree and commit
-            target = self.skills_dir / name
-            if target.exists():
-                shutil.rmtree(target)
-                self._git.add("-A")
-                self._git.commit(f"skillm: remove {name}")
+    def remove_skill(self, name: str) -> None:
+        """Remove a skill from the working tree and commit."""
+        target = self.skills_dir / name
+        if target.exists():
+            shutil.rmtree(target)
+            self._git.add("-A")
+            self._git.commit(f"skillm: remove {name}")
 
         # Clean cache
-        cache = self._cache_dir / lib / name
-        if version:
-            cache = cache / version
+        cache = self._cache_dir / name
         if cache.exists():
             shutil.rmtree(cache)
 
-    def list_skill_dirs(self, library: str | None = None) -> list[tuple[str, list[str]]]:
-        """List skills and their versions.
-
-        If library is specified, returns only skills from that library.
-        Otherwise returns skills from all libraries.
-
-        Returns list of (skill_name, [versions]) tuples.
-        """
-        if not self._git.is_repo():
+    def list_skill_names(self) -> list[str]:
+        """List skill directories in the working tree."""
+        if not self.skills_dir.exists():
             return []
-
-        parsed = self._git.parse_all_tags()
-        skills: dict[str, list[str]] = {}
-
-        for lib, skill_name, version in parsed:
-            if library and lib != library:
+        names = []
+        for item in sorted(self.skills_dir.iterdir()):
+            if not item.is_dir() or item.name.startswith("."):
                 continue
-            skills.setdefault(skill_name, []).append(version)
+            if (item / "SKILL.md").exists():
+                names.append(item.name)
+        return names
 
-        return [(name, sorted(versions)) for name, versions in sorted(skills.items())]
+    def skill_exists(self, name: str) -> bool:
+        return (self.skills_dir / name / "SKILL.md").exists()
 
-    def list_skill_dirs_by_library(self) -> dict[str, list[tuple[str, list[str]]]]:
-        """List skills grouped by library.
+    def uncommitted_changes(self) -> list[str]:
+        """Return list of changed skill directories in the working tree."""
+        if not self._git.has_changes():
+            return []
+        result = self._git._run("status", "--porcelain", check=False)
+        changed = set()
+        for line in (result.stdout or "").strip().split("\n"):
+            if not line.strip():
+                continue
+            # Format: "XY path" or "XY path -> new_path"
+            path = line[3:].strip().split(" -> ")[0]
+            # Get top-level directory (skill name)
+            parts = path.split("/")
+            if parts and not parts[0].startswith("."):
+                changed.add(parts[0])
+        return sorted(changed)
 
-        Returns dict of {library: [(skill_name, [versions])]}.
+    def skill_commit_info(self, name: str) -> tuple[str, str]:
+        """Get last commit hash and date for a skill directory.
+
+        Returns (short_hash, iso_date).
         """
-        if not self._git.is_repo():
-            return {}
-
-        parsed = self._git.parse_all_tags()
-        libs: dict[str, dict[str, list[str]]] = {}
-
-        for lib, skill_name, version in parsed:
-            libs.setdefault(lib, {}).setdefault(skill_name, []).append(version)
-
-        return {
-            lib: [(name, sorted(vers)) for name, vers in sorted(skills.items())]
-            for lib, skills in sorted(libs.items())
-        }
-
-    def skill_exists(self, name: str, version: str, library: str | None = None) -> bool:
-        tag = self._tag_name(name, version, library)
-        return self._git.tag_exists(tag)
+        result = self._git._run(
+            "log", "-1", "--format=%h %aI", "--", name,
+            check=False,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return ("", "")
+        parts = result.stdout.strip().split(" ", 1)
+        return (parts[0], parts[1] if len(parts) > 1 else "")
 
     # ── Library (branch) operations ────────────────────────────
 
@@ -198,11 +164,11 @@ class LocalBackend(LibraryBackend):
     # ── Git push/pull (always target origin) ──────────────────
 
     def git_push(self, as_branch: str | None = None) -> str:
-        """Push current branch and tags to origin."""
+        """Push current branch to origin."""
         branch = self._current_library()
         if as_branch:
             result = self._git._run(
-                "push", "origin", f"{branch}:{as_branch}", "--tags",
+                "push", "origin", f"{branch}:{as_branch}",
                 check=False,
             )
             if result.returncode != 0:
@@ -210,7 +176,7 @@ class LocalBackend(LibraryBackend):
                 raise GitError(f"push failed: {(result.stderr or '').strip()}")
             return (result.stdout or "").strip()
         else:
-            return self._git.push("origin", include_tags=True)
+            return self._git.push("origin", include_tags=False)
 
     def git_pull(self) -> None:
         """Pull from origin (fetch + merge)."""
@@ -227,7 +193,7 @@ class LocalBackend(LibraryBackend):
             if "not something we can merge" not in stderr and "refusing to merge" not in stderr:
                 from ..git import GitError
                 raise GitError(f"merge failed: {stderr}")
-        # Clear cache since tags may have changed
+        # Clear cache
         if self._cache_dir.exists():
             shutil.rmtree(self._cache_dir)
             self._cache_dir.mkdir(exist_ok=True)

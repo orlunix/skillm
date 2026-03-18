@@ -14,21 +14,17 @@ class LibraryBackend(ABC):
         """Set up the backend (create dirs, etc.)."""
 
     @abstractmethod
-    def get_skill_files(self, name: str, version: str, library: str | None = None) -> Path:
-        """Fetch skill files, return local directory path."""
+    def put_skill(self, name: str, source_dir: Path) -> str:
+        """Store skill files from a local directory. Returns commit hash."""
 
     @abstractmethod
-    def put_skill_files(self, name: str, version: str, source_dir: Path) -> None:
-        """Store skill files from a local directory."""
+    def remove_skill(self, name: str) -> None:
+        """Remove a skill entirely."""
 
     @abstractmethod
-    def remove_skill_files(self, name: str, version: str | None = None) -> None:
-        """Remove skill files. If version is None, remove all versions."""
+    def list_skill_names(self) -> list[str]:
+        """List all skill names in the working tree."""
 
     @abstractmethod
-    def list_skill_dirs(self, library: str | None = None) -> list[tuple[str, list[str]]]:
-        """List all skills and their versions from the file store."""
-
-    @abstractmethod
-    def skill_exists(self, name: str, version: str, library: str | None = None) -> bool:
-        """Check if a skill version exists in the store."""
+    def skill_exists(self, name: str) -> bool:
+        """Check if a skill exists in the working tree."""

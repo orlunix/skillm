@@ -12,7 +12,7 @@ from rich.table import Table
 
 from . import __version__
 from .config import Config, load_config
-from .core import Library, Project, get_library
+from .core import AGENT_DIRS, Library, Project, get_library
 from .inject import inject as inject_skills
 from .skillpack import export_skill, import_skillpack
 
@@ -236,6 +236,16 @@ def push_cmd(repo_name: str | None, as_branch: str | None):
     lib = _get_library()
     target = repo_name or lib.config.library.active_repo
 
+    # Warn about uncommitted changes
+    try:
+        backend = lib.repo_mgr.get_backend(target)
+        changed = backend.uncommitted_changes()
+        if changed:
+            console.print(f"[yellow]Warning: uncommitted changes in: {', '.join(changed)}[/yellow]")
+            console.print("[dim]Run 'skillm add <source>' to commit them first, or they won't be pushed.[/dim]")
+    except Exception:
+        pass
+
     try:
         lib.push(repo_name, as_branch=as_branch)
         branch_info = f" → remote branch '{as_branch}'" if as_branch else ""
@@ -280,10 +290,10 @@ def pull_cmd(repo_name: str | None, branch_name: str | None):
 
             # Fetch + merge + rebuild via standard pull path
             count = lib.pull(repo_name)
-            console.print(f"[green]Pulled branch '{branch_name}' — {count} version(s) indexed[/green]")
+            console.print(f"[green]Pulled branch '{branch_name}' — {count} skill(s) indexed[/green]")
         else:
             count = lib.pull(repo_name)
-            console.print(f"[green]Pulled repo '{target}' — {count} version(s) indexed[/green]")
+            console.print(f"[green]Pulled repo '{target}' — {count} skill(s) indexed[/green]")
     except Exception as e:
         msg = str(e)
         console.print(f"[red]Pull failed: {msg}[/red]")
@@ -296,11 +306,9 @@ def pull_cmd(repo_name: str | None, branch_name: str | None):
 @cli.command("add")
 @click.argument("source", type=click.Path(exists=True))
 @click.option("--name", default=None, help="Override skill name")
-@click.option("--major", is_flag=True, help="Bump major version (v1.0 → v2.0)")
-@click.option("--version", default=None, help="Explicit version string")
 @click.option("-c", "--category", default=None, help="Set skill category")
-def add_cmd(source: str, name: str | None, major: bool, version: str | None, category: str | None):
-    """Add a skill to the library. Creates a new minor version by default."""
+def add_cmd(source: str, name: str | None, category: str | None):
+    """Add or update a skill in the library."""
     from .metadata import extract_metadata
     from .scan import scan_skill_content, diff_requires
 
@@ -324,7 +332,7 @@ def add_cmd(source: str, name: str | None, major: bool, version: str | None, cat
     except (FileNotFoundError, Exception):
         pass
 
-    skill_name, ver = lib.publish(source_path, name=name, version=version, major=major)
+    skill_name = lib.publish(source_path, name=name)
 
     if category:
         skill = lib.info(skill_name)
@@ -332,38 +340,16 @@ def add_cmd(source: str, name: str | None, major: bool, version: str | None, cat
             skill.category = category.strip().lower()
             lib.db.update_skill(skill)
 
-    console.print(f"[green]Added {skill_name}@{ver}[/green]")
-
-
-@cli.command("update")
-@click.argument("source", type=click.Path(exists=True))
-@click.option("--name", default=None, help="Override skill name")
-def update_cmd(source: str, name: str | None):
-    """Replace the latest version of an existing skill in-place.
-
-    Unlike 'add' which creates a new version, 'update' overwrites the
-    latest version. Useful for fixing typos or small corrections.
-
-    Errors if the skill doesn't exist — use 'add' for new skills.
-    """
-    lib = _get_library()
-    source_path = Path(source)
-    try:
-        skill_name, ver = lib.override(source_path, name=name)
-        console.print(f"[green]Updated {skill_name}@{ver}[/green]")
-    except ValueError as e:
-        console.print(f"[red]{e}[/red]")
+    console.print(f"[green]Added {skill_name}[/green]")
 
 
 @cli.command("rm")
 @click.argument("name")
-@click.option("--version", default=None, help="Remove specific version only")
-def rm_cmd(name: str, version: str | None):
+def rm_cmd(name: str):
     """Remove a skill from the library."""
     lib = _get_library()
-    if lib.remove(name, version=version):
-        target = f"{name}@{version}" if version else name
-        console.print(f"[green]Removed {target}[/green]")
+    if lib.remove(name):
+        console.print(f"[green]Removed {name}[/green]")
     else:
         console.print(f"[red]Skill '{name}' not found[/red]")
 
@@ -390,13 +376,12 @@ def info(name: str):
         console.print(f"[bold]Author:[/bold] {skill.author}")
     if skill.source:
         console.print(f"[bold]Source:[/bold] {skill.source}")
-    if skill.versions:
-        ver_str = ", ".join(v.version for v in skill.versions)
-        latest = skill.versions[-1].version
-        console.print(f"[bold]Versions:[/bold] {ver_str} (latest: {latest})")
-        total = sum(v.total_size for v in skill.versions)
-        total_files = sum(v.file_count for v in skill.versions)
-        console.print(f"[bold]Files:[/bold] {total_files} ({_format_size(total)})")
+    if skill.commit:
+        console.print(f"[bold]Commit:[/bold] {skill.commit}")
+    if skill.file_count:
+        console.print(f"[bold]Files:[/bold] {skill.file_count} ({_format_size(skill.total_size)})")
+    if skill.updated_at:
+        console.print(f"[bold]Updated:[/bold] {skill.updated_at[:10]}")
 
 
 @cli.command("list")
@@ -404,91 +389,41 @@ def info(name: str):
 def list_cmd(category: str | None):
     """List all skills in the library."""
     lib = _get_library()
+    skills = lib.list_skills()
 
     if category:
-        skills = lib.db.list_skills_by_category(category)
-    else:
-        skills = lib.list_skills()
+        skills = [s for s in skills if (s.category or "general").lower() == category.lower()]
 
     if not skills:
         msg = f"No skills in category '{category}'." if category else "No skills in library."
         console.print(f"[dim]{msg}[/dim]")
         return
 
-    if not category:
-        # Group by category
-        grouped: dict[str, list] = {}
-        for skill in skills:
-            cat = skill.category or "general"
-            grouped.setdefault(cat, []).append(skill)
+    # Group by category
+    grouped: dict[str, list] = {}
+    for skill in skills:
+        cat = skill.category or "general"
+        grouped.setdefault(cat, []).append(skill)
 
-        for cat in sorted(grouped):
-            table = Table(show_header=True, title=cat, title_style="bold cyan")
-            table.add_column("Name", style="bold")
-            table.add_column("Latest")
-            table.add_column("Tags")
-            table.add_column("Size", justify="right")
-
-            for skill in grouped[cat]:
-                latest = skill.versions[-1] if skill.versions else None
-                table.add_row(
-                    skill.name,
-                    latest.version if latest else "-",
-                    ", ".join(skill.tags) if skill.tags else "",
-                    _format_size(latest.total_size) if latest else "-",
-                )
-
-            console.print(table)
-            console.print()
-    else:
-        table = Table(show_header=True, title=category, title_style="bold cyan")
+    for cat in sorted(grouped):
+        table = Table(show_header=True, title=cat, title_style="bold cyan")
         table.add_column("Name", style="bold")
-        table.add_column("Latest")
+        table.add_column("Commit")
         table.add_column("Tags")
         table.add_column("Size", justify="right")
+        table.add_column("Updated")
 
-        for skill in skills:
-            latest = skill.versions[-1] if skill.versions else None
+        for skill in grouped[cat]:
             table.add_row(
                 skill.name,
-                latest.version if latest else "-",
+                skill.commit[:7] if skill.commit else "-",
                 ", ".join(skill.tags) if skill.tags else "",
-                _format_size(latest.total_size) if latest else "-",
+                _format_size(skill.total_size) if skill.total_size else "-",
+                skill.updated_at[:10] if skill.updated_at else "-",
             )
 
         console.print(table)
-
-
-@cli.command()
-@click.argument("name")
-def versions(name: str):
-    """List all versions of a skill."""
-    lib = _get_library()
-    skill = lib.info(name)
-    if skill is None:
-        console.print(f"[red]Skill '{name}' not found[/red]")
-        return
-
-    if not skill.versions:
-        console.print("[dim]No versions.[/dim]")
-        return
-
-    table = Table(show_header=True)
-    table.add_column("Version")
-    table.add_column("Files", justify="right")
-    table.add_column("Size", justify="right")
-    table.add_column("Published")
-
-    for v in skill.versions:
-        latest_marker = " (latest)" if v == skill.versions[-1] else ""
-        table.add_row(
-            v.version + latest_marker,
-            str(v.file_count),
-            _format_size(v.total_size),
-            v.published_at[:10] if v.published_at else "-",
-        )
-
-    console.print(table)
+        console.print()
 
 
 @cli.command()
@@ -503,10 +438,9 @@ def search(query: str):
         return
 
     for skill in results:
-        latest = skill.versions[-1] if skill.versions else None
-        ver = f"@{latest.version}" if latest else ""
+        commit = f" ({skill.commit[:7]})" if skill.commit else ""
         tags = f" [{', '.join(skill.tags)}]" if skill.tags else ""
-        console.print(f"[bold]{skill.name}[/bold]{ver}{tags}")
+        console.print(f"[bold]{skill.name}[/bold]{commit}{tags}")
         if skill.description:
             console.print(f"  {skill.description}")
 
@@ -579,7 +513,7 @@ _root_option = click.option("--project-root", "-r", default=None,
 
 @cli.command("install")
 @click.argument("name", required=False, default=None)
-@click.option("--pin", is_flag=True, help="Pin to this version")
+@click.option("--pin", is_flag=True, help="Pin to current commit (skip on upgrade)")
 @click.option("--hard", is_flag=True, help="Copy files instead of symlinking (frozen snapshot)")
 @click.option("-g", "--global", "global_install", is_flag=True, help="Install into global agent config (~/.claude/skills/)")
 @click.option("--tag", "install_tag", default=None, help="Install all skills matching a tag")
@@ -616,6 +550,12 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
         for p in conflicts:
             console.print(f"[yellow]Warning: '{skill_name}' already exists at {p} — agent may load duplicates[/yellow]")
 
+    def _install_one(skill_name):
+        _warn_conflicts(skill_name)
+        result = project.add(skill_name, pin=pin, soft=soft)
+        label = "linked" if result == "linked" else "copied"
+        console.print(f"[green]Installed {skill_name} → {label}[/green]")
+
     if install_tag:
         matches = lib.find_skills_by_tag(install_tag, repo=repo)
         if not matches:
@@ -623,10 +563,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in matches:
             try:
-                _warn_conflicts(skill_name)
-                ver = project.add(skill_name, pin=pin, soft=soft)
-                label = f"→ linked" if soft else f"@{ver}"
-                console.print(f"[green]Installed {skill_name} {label}[/green]")
+                _install_one(skill_name)
             except Exception as e:
                 console.print(f"[red]{skill_name}: {e}[/red]")
         console.print(f"[green]{len(matches)} skill(s) installed ({mode})[/green]")
@@ -639,10 +576,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in matches:
             try:
-                _warn_conflicts(skill_name)
-                ver = project.add(skill_name, pin=pin, soft=soft)
-                label = f"→ linked" if soft else f"@{ver}"
-                console.print(f"[green]Installed {skill_name} {label}[/green]")
+                _install_one(skill_name)
             except Exception as e:
                 console.print(f"[red]{skill_name}: {e}[/red]")
         console.print(f"[green]{len(matches)} skill(s) installed ({mode})[/green]")
@@ -659,74 +593,139 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in all_skills:
             try:
-                _warn_conflicts(skill_name)
-                ver = project.add(skill_name, pin=pin, soft=soft)
-                label = f"→ linked" if soft else f"@{ver}"
-                console.print(f"[green]Installed {skill_name} {label}[/green]")
+                _install_one(skill_name)
             except Exception as e:
                 console.print(f"[red]{skill_name}: {e}[/red]")
         console.print(f"[green]{len(all_skills)} skill(s) installed from '{target_repo}' ({mode})[/green]")
         return
 
-    version = None
-    if "@" in name:
-        name, version = name.rsplit("@", 1)
-        soft = False  # specific version requires hard install
-
-    _warn_conflicts(name.split("/")[-1] if "/" in name else name.split(":")[-1] if ":" in name else name)
-    ver = project.add(name, version=version, pin=pin, soft=soft)
+    bare_name = name.split("/")[-1] if "/" in name else name.split(":")[-1] if ":" in name else name
+    _warn_conflicts(bare_name)
+    result = project.add(name, pin=pin, soft=soft)
     scope = "globally" if global_install else "to project"
-    if soft:
-        console.print(f"[green]Installed {name} → linked {scope}[/green]")
-    else:
-        console.print(f"[green]Installed {name}@{ver} → {project.skills_dir}/ ({scope})[/green]")
+    label = "linked" if result == "linked" else "copied"
+    console.print(f"[green]Installed {name} → {label} {scope}[/green]")
 
     # Run env check and warn
-    skill_dir = project.skills_dir / name
-    if skill_dir.exists():
-        meta = extract_metadata(skill_dir)
-        report = check_requirements(name, meta.requires)
-        if report.has_checks and not report.all_ok:
-            console.print(f"[yellow]Warning: {report.failed} unmet requirement(s):[/yellow]")
-            for r in report.results:
-                if not r.ok:
-                    console.print(f"  [red]✗[/red] {r.name} — {r.message}")
+    skill_dir = project.skills_dir / bare_name
+    if skill_dir.exists() or skill_dir.is_symlink():
+        target = skill_dir.resolve() if skill_dir.is_symlink() else skill_dir
+        if target.exists():
+            meta = extract_metadata(target)
+            report = check_requirements(bare_name, meta.requires)
+            if report.has_checks and not report.all_ok:
+                console.print(f"[yellow]Warning: {report.failed} unmet requirement(s):[/yellow]")
+                for r in report.results:
+                    if not r.ok:
+                        console.print(f"  [red]✗[/red] {r.name} — {r.message}")
 
 
 @cli.command("uninstall")
 @click.argument("name", required=False, default=None)
-@click.option("-g", "--global", "global_install", is_flag=True, help="Uninstall from global agent config")
+@click.option("-g", "--global", "global_install", is_flag=True, help="Also uninstall from global agent config (~/.claude/skills/)")
 @_agent_option
 @_root_option
 def uninstall_cmd(name: str | None, global_install: bool, agent: str, project_root: str | None):
-    """Uninstall skills from this project (or globally).
+    """Uninstall skills from project, parent dirs, and optionally global.
 
     \b
-    skillm uninstall deploy-k8s        Uninstall one skill
-    skillm uninstall                   Uninstall all skills
-    skillm uninstall -g                Uninstall all global skills
+    skillm uninstall deploy-k8s        Remove from project + parent dirs
+    skillm uninstall deploy-k8s -g     Also remove from ~/.claude/skills/
+    skillm uninstall                   Remove all from project + parent dirs
+    skillm uninstall -g                Remove all including global
     """
-    if global_install:
-        from pathlib import Path
-        project_root = str(Path.home())
-    project = _get_project(agent=agent, project_root=project_root)
+    from pathlib import Path
+
+    home = Path.home()
+    agent_dir_name = AGENT_DIRS.get(agent, f".{agent}")
+    project_dir = Path(project_root).resolve() if project_root else Path.cwd().resolve()
+
+    def _uninstall_from_all(skill_name: str):
+        """Remove skill from project, parent dirs, and optionally home."""
+        removed = []
+
+        # Current project
+        project = _get_project(agent=agent, project_root=project_root)
+        if project.drop(skill_name):
+            removed.append(str(project.skills_dir / skill_name))
+
+        # Parent directories (up to home, not including home)
+        current = project_dir.parent
+        while current != home.parent and current != current.parent:
+            parent_skills = current / agent_dir_name / "skills" / skill_name
+            if parent_skills.is_symlink():
+                parent_skills.unlink()
+                removed.append(str(parent_skills))
+            elif parent_skills.exists():
+                shutil.rmtree(parent_skills)
+                removed.append(str(parent_skills))
+            current = current.parent
+
+        # Global (~/.claude/skills/) only with -g
+        if global_install:
+            global_skill = home / agent_dir_name / "skills" / skill_name
+            if global_skill.is_symlink():
+                global_skill.unlink()
+                removed.append(str(global_skill))
+            elif global_skill.exists():
+                shutil.rmtree(global_skill)
+                removed.append(str(global_skill))
+
+        return removed
 
     if not name:
-        # Uninstall all
-        skills = list(project.list_skills().keys())
-        if not skills:
+        # Collect all skill names from project + parent dirs + global
+        all_names = set()
+        project = _get_project(agent=agent, project_root=project_root)
+        all_names.update(project.list_skills().keys())
+
+        # Scan parent dirs
+        current = project_dir.parent
+        while current != home.parent and current != current.parent:
+            parent_skills_dir = current / agent_dir_name / "skills"
+            if parent_skills_dir.exists():
+                for item in parent_skills_dir.iterdir():
+                    if item.is_dir() or item.is_symlink():
+                        all_names.add(item.name)
+            current = current.parent
+
+        # Scan global
+        if global_install:
+            global_skills_dir = home / agent_dir_name / "skills"
+            if global_skills_dir.exists():
+                for item in global_skills_dir.iterdir():
+                    if item.is_dir() or item.is_symlink():
+                        all_names.add(item.name)
+
+        if not all_names:
             console.print("[dim]No skills installed[/dim]")
             return
-        for skill_name in skills:
-            project.drop(skill_name)
-            console.print(f"[green]Uninstalled {skill_name}[/green]")
-        console.print(f"[green]{len(skills)} skill(s) uninstalled[/green]")
+        for skill_name in sorted(all_names):
+            removed = _uninstall_from_all(skill_name)
+            if removed:
+                console.print(f"[green]Uninstalled {skill_name}[/green]")
+                for p in removed:
+                    console.print(f"  [dim]removed {p}[/dim]")
+        if not global_install:
+            # Check if any remain in global
+            global_skills_dir = home / agent_dir_name / "skills"
+            if global_skills_dir.exists():
+                remaining = [i.name for i in global_skills_dir.iterdir() if i.is_dir() or i.is_symlink()]
+                if remaining:
+                    console.print(f"[yellow]Note: {len(remaining)} skill(s) still in ~/{agent_dir_name}/skills/ (use -g to remove)[/yellow]")
         return
 
-    if project.drop(name):
+    removed = _uninstall_from_all(name)
+    if removed:
         console.print(f"[green]Uninstalled {name}[/green]")
+        for p in removed:
+            console.print(f"  [dim]removed {p}[/dim]")
+        if not global_install:
+            global_skill = home / agent_dir_name / "skills" / name
+            if global_skill.exists() or global_skill.is_symlink():
+                console.print(f"[yellow]Note: '{name}' still in ~/{agent_dir_name}/skills/ (use -g to remove)[/yellow]")
     else:
-        console.print(f"[red]Skill '{name}' not in project[/red]")
+        console.print(f"[red]Skill '{name}' not found[/red]")
 
 
 @cli.command()
@@ -751,8 +750,8 @@ def upgrade(name: str | None, agent: str, project_root: str | None):
     project = _get_project(agent=agent, project_root=project_root)
     upgraded = project.upgrade(name=name)
     if upgraded:
-        for skill_name, old, new in upgraded:
-            console.print(f"[green]{skill_name}: {old} → {new}[/green]")
+        for skill_name in upgraded:
+            console.print(f"[green]Upgraded {skill_name}[/green]")
     else:
         console.print("[dim]Everything up to date.[/dim]")
 
@@ -793,19 +792,25 @@ def check_cmd(name: str | None, scan: bool, agent: str, project_root: str | None
     from .scan import scan_skill_content, diff_requires
 
     if name:
-        # Single skill check from library
+        # Single skill check from library — find skill dir in working tree
         lib = _get_library()
         skill = lib.info(name)
         if skill is None:
             console.print(f"[red]Skill '{name}' not found[/red]")
             return
 
-        latest = lib.db.get_latest_version(skill.id)
-        if latest is None:
-            console.print(f"[red]No versions for '{name}'[/red]")
+        # Resolve to working tree directory
+        parts = skill.name.split("/")
+        unqualified = parts[-1] if len(parts) > 1 else skill.name
+        if skill.repo and lib.repo_mgr.repo_exists(skill.repo):
+            backend = lib.repo_mgr.get_backend(skill.repo)
+        else:
+            backend = lib.backend
+        skill_dir = backend.skills_dir / unqualified
+        if not skill_dir.exists():
+            console.print(f"[red]Skill files not found in working tree[/red]")
             return
 
-        skill_dir = lib.get_skill_files_path(name, latest.version)
         meta = extract_metadata(skill_dir)
         requires = meta.requires
 
@@ -926,9 +931,8 @@ def disable_cmd(name: str, agent: str, project_root: str | None):
 
 @cli.command("export")
 @click.argument("name")
-@click.option("--version", default=None, help="Specific version (default: latest)")
 @click.option("--output", default=None, type=click.Path(), help="Output directory")
-def export_cmd(name: str, version: str | None, output: str | None):
+def export_cmd(name: str, output: str | None):
     """Export a skill as a .skillpack archive."""
     lib = _get_library()
     skill = lib.info(name)
@@ -936,18 +940,23 @@ def export_cmd(name: str, version: str | None, output: str | None):
         console.print(f"[red]Skill '{name}' not found[/red]")
         return
 
-    if version is None:
-        ver = lib.db.get_latest_version(skill.id)
-        if ver is None:
-            console.print(f"[red]No versions for '{name}'[/red]")
-            return
-        version = ver.version
+    # Resolve to working tree directory
+    parts = skill.name.split("/")
+    unqualified = parts[-1] if len(parts) > 1 else skill.name
+    if skill.repo and lib.repo_mgr.repo_exists(skill.repo):
+        backend = lib.repo_mgr.get_backend(skill.repo)
+    else:
+        backend = lib.backend
+    skill_path = backend.skills_dir / unqualified
+    if not skill_path.exists():
+        console.print(f"[red]Skill files not found in working tree[/red]")
+        return
 
-    skill_path = lib.get_skill_files_path(name, version)
     output_dir = Path(output) if output else Path.cwd()
+    version = skill.commit[:7] if skill.commit else "latest"
 
     archive = export_skill(
-        skill_path, name, version,
+        skill_path, unqualified, version,
         {"description": skill.description, "author": skill.author, "tags": skill.tags},
         output_dir=output_dir,
     )
@@ -990,36 +999,34 @@ def import_cmd(source: str, name: str | None, ref: str | None, token: str | None
     try:
         if source_type == "skillpack":
             files_dir, metadata = import_skillpack(Path(source))
-            skill_name = name or metadata["name"]
-            version = metadata.get("version", "v1")
-            lib.publish(files_dir, name=skill_name, version=version, source=source)
+            skill_name = lib.publish(files_dir, name=name or metadata.get("name"), source=source)
             shutil.rmtree(files_dir.parent)
-            console.print(f"[green]Imported {skill_name}@{version} from {Path(source).name}[/green]")
+            console.print(f"[green]Imported {skill_name} from {Path(source).name}[/green]")
 
         elif source_type == "directory":
-            skill_name, ver = lib.publish(Path(source), name=name)
-            console.print(f"[green]Imported {skill_name}@{ver}[/green]")
+            skill_name = lib.publish(Path(source), name=name)
+            console.print(f"[green]Imported {skill_name}[/green]")
 
         elif source_type == "github":
             console.print(f"[dim]Fetching from GitHub: {source}...[/dim]")
             skill_dir, source_str = import_from_github(source, ref=ref, token=token)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            skill_name = lib.publish(skill_dir, name=name, source=source_str)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-gh-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from GitHub ({source_str})[/green]")
+            console.print(f"[green]Imported {skill_name} from GitHub ({source_str})[/green]")
 
         elif source_type == "clawhub":
             console.print(f"[dim]Fetching from ClawHub: {source}...[/dim]")
             skill_dir, source_str = import_from_clawhub(source, token=token)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            skill_name = lib.publish(skill_dir, name=name, source=source_str)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-ch-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from ClawHub ({source_str})[/green]")
+            console.print(f"[green]Imported {skill_name} from ClawHub ({source_str})[/green]")
 
         elif source_type == "url":
             console.print(f"[dim]Downloading: {source}...[/dim]")
             skill_dir, source_str = import_from_url(source)
-            skill_name, ver = lib.publish(skill_dir, name=name, source=source_str)
+            skill_name = lib.publish(skill_dir, name=name, source=source_str)
             shutil.rmtree(skill_dir.parent if skill_dir.parent.name.startswith("skillm-url-") else skill_dir)
-            console.print(f"[green]Imported {skill_name}@{ver} from URL[/green]")
+            console.print(f"[green]Imported {skill_name} from URL[/green]")
 
     except FileNotFoundError as e:
         console.print(f"[red]{e}[/red]")

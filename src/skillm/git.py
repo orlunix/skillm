@@ -79,6 +79,11 @@ class GitRepo:
         except Exception:
             return False
 
+    def head_commit(self) -> str:
+        """Get the short hash of HEAD."""
+        result = self._run("rev-parse", "--short", "HEAD", check=False)
+        return result.stdout.strip() if result.returncode == 0 else ""
+
     # ── Branch operations ─────────────────────────────────────
 
     def current_branch(self) -> str:

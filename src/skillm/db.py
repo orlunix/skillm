@@ -5,7 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
-from .models import FileRecord, Skill, Version
+from .models import Skill
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS skills (
@@ -16,20 +16,11 @@ CREATE TABLE IF NOT EXISTS skills (
     category    TEXT DEFAULT '',
     author      TEXT DEFAULT '',
     source      TEXT DEFAULT '',
-    created_at  TEXT NOT NULL,
-    updated_at  TEXT NOT NULL,
-    UNIQUE(repo, name)
-);
-
-CREATE TABLE IF NOT EXISTS versions (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    skill_id    INTEGER NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
-    version     TEXT NOT NULL,
-    changelog   TEXT DEFAULT '',
+    commit_hash TEXT DEFAULT '',
     file_count  INTEGER DEFAULT 0,
     total_size  INTEGER DEFAULT 0,
-    published_at TEXT NOT NULL,
-    UNIQUE(skill_id, version)
+    updated_at  TEXT NOT NULL,
+    UNIQUE(repo, name)
 );
 
 CREATE TABLE IF NOT EXISTS tags (
@@ -38,27 +29,16 @@ CREATE TABLE IF NOT EXISTS tags (
     PRIMARY KEY (skill_id, tag)
 );
 
-CREATE TABLE IF NOT EXISTS files (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    version_id  INTEGER NOT NULL REFERENCES versions(id) ON DELETE CASCADE,
-    rel_path    TEXT NOT NULL,
-    size        INTEGER DEFAULT 0,
-    sha256      TEXT NOT NULL,
-    UNIQUE(version_id, rel_path)
-);
-
 CREATE TABLE IF NOT EXISTS library_meta (
     key         TEXT PRIMARY KEY,
     value       TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_skills_repo ON skills(repo);
-CREATE INDEX IF NOT EXISTS idx_versions_skill ON versions(skill_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag);
-CREATE INDEX IF NOT EXISTS idx_files_version ON files(version_id);
 """
 
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 
 
 class Database:
@@ -87,7 +67,6 @@ class Database:
                 "SELECT value FROM library_meta WHERE key = 'schema_version'"
             ).fetchone()
             if row and row["value"] != SCHEMA_VERSION:
-                # Schema changed — drop and recreate (rebuild required)
                 self.conn.executescript("""
                     DROP TABLE IF EXISTS files;
                     DROP TABLE IF EXISTS versions;
@@ -96,7 +75,7 @@ class Database:
                     DROP TABLE IF EXISTS library_meta;
                 """)
         except Exception:
-            pass  # Fresh DB or table doesn't exist
+            pass
 
         self.conn.executescript(SCHEMA)
         self.conn.execute(
@@ -117,24 +96,43 @@ class Database:
             id=row["id"], repo=row["repo"], name=row["name"],
             description=row["description"], category=row["category"],
             author=row["author"], source=row["source"],
-            created_at=row["created_at"], updated_at=row["updated_at"],
+            commit=row["commit_hash"],
+            file_count=row["file_count"], total_size=row["total_size"],
+            updated_at=row["updated_at"],
         )
         skill.tags = self.get_tags(skill.id)
-        skill.versions = self.get_versions(skill.id)
         return skill
 
     # ── Skill CRUD ──────────────────────────────────────────
 
     def insert_skill(self, skill: Skill) -> int:
         cur = self.conn.execute(
-            "INSERT INTO skills(repo, name, description, category, author, source, created_at, updated_at) "
-            "VALUES(?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO skills(repo, name, description, category, author, source, "
+            "commit_hash, file_count, total_size, updated_at) "
+            "VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (skill.repo, skill.name, skill.description, skill.category,
-             skill.author, skill.source, skill.created_at, skill.updated_at),
+             skill.author, skill.source, skill.commit,
+             skill.file_count, skill.total_size, skill.updated_at),
         )
         skill_id = cur.lastrowid
         self.conn.commit()
         return skill_id
+
+    def upsert_skill(self, skill: Skill) -> int:
+        """Insert or update a skill. Returns skill id."""
+        existing = self.get_skill(skill.name, repo=skill.repo)
+        if existing:
+            existing.description = skill.description
+            existing.category = skill.category or existing.category
+            existing.author = skill.author or existing.author
+            existing.source = skill.source or existing.source
+            existing.commit = skill.commit or existing.commit
+            existing.file_count = skill.file_count
+            existing.total_size = skill.total_size
+            existing.updated_at = skill.updated_at
+            self.update_skill(existing)
+            return existing.id
+        return self.insert_skill(skill)
 
     def get_skill(self, name: str, repo: str | None = None) -> Skill | None:
         if repo:
@@ -168,8 +166,10 @@ class Database:
 
     def update_skill(self, skill: Skill) -> None:
         self.conn.execute(
-            "UPDATE skills SET description=?, category=?, author=?, source=?, updated_at=? WHERE id=?",
-            (skill.description, skill.category, skill.author, skill.source, skill.updated_at, skill.id),
+            "UPDATE skills SET description=?, category=?, author=?, source=?, "
+            "commit_hash=?, file_count=?, total_size=?, updated_at=? WHERE id=?",
+            (skill.description, skill.category, skill.author, skill.source,
+             skill.commit, skill.file_count, skill.total_size, skill.updated_at, skill.id),
         )
         self.conn.commit()
 
@@ -196,65 +196,6 @@ class Database:
             ).fetchall()
         return [self._row_to_skill(row) for row in rows]
 
-    # ── Version CRUD ────────────────────────────────────────
-
-    def insert_version(self, version: Version) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO versions(skill_id, version, changelog, file_count, total_size, published_at) "
-            "VALUES(?, ?, ?, ?, ?, ?)",
-            (version.skill_id, version.version, version.changelog,
-             version.file_count, version.total_size, version.published_at),
-        )
-        self.conn.commit()
-        return cur.lastrowid
-
-    def get_versions(self, skill_id: int) -> list[Version]:
-        rows = self.conn.execute(
-            "SELECT * FROM versions WHERE skill_id = ? ORDER BY id", (skill_id,)
-        ).fetchall()
-        return [
-            Version(
-                id=r["id"], skill_id=r["skill_id"], version=r["version"],
-                changelog=r["changelog"], file_count=r["file_count"],
-                total_size=r["total_size"], published_at=r["published_at"],
-            )
-            for r in rows
-        ]
-
-    def get_latest_version(self, skill_id: int) -> Version | None:
-        row = self.conn.execute(
-            "SELECT * FROM versions WHERE skill_id = ? ORDER BY id DESC LIMIT 1",
-            (skill_id,),
-        ).fetchone()
-        if not row:
-            return None
-        return Version(
-            id=row["id"], skill_id=row["skill_id"], version=row["version"],
-            changelog=row["changelog"], file_count=row["file_count"],
-            total_size=row["total_size"], published_at=row["published_at"],
-        )
-
-    def get_version(self, skill_id: int, version: str) -> Version | None:
-        row = self.conn.execute(
-            "SELECT * FROM versions WHERE skill_id = ? AND version = ?",
-            (skill_id, version),
-        ).fetchone()
-        if not row:
-            return None
-        return Version(
-            id=row["id"], skill_id=row["skill_id"], version=row["version"],
-            changelog=row["changelog"], file_count=row["file_count"],
-            total_size=row["total_size"], published_at=row["published_at"],
-        )
-
-    def delete_version(self, skill_id: int, version: str) -> bool:
-        cur = self.conn.execute(
-            "DELETE FROM versions WHERE skill_id = ? AND version = ?",
-            (skill_id, version),
-        )
-        self.conn.commit()
-        return cur.rowcount > 0
-
     # ── Tags ────────────────────────────────────────────────
 
     def get_tags(self, skill_id: int) -> list[str]:
@@ -272,44 +213,7 @@ class Database:
             )
         self.conn.commit()
 
-    def add_tags(self, skill_id: int, tags: list[str]) -> None:
-        existing = self.get_tags(skill_id)
-        merged = list(set(existing + [t.strip().lower() for t in tags]))
-        self.set_tags(skill_id, merged)
-
-    def remove_tags(self, skill_id: int, tags: list[str]) -> None:
-        remove_set = {t.strip().lower() for t in tags}
-        existing = self.get_tags(skill_id)
-        self.set_tags(skill_id, [t for t in existing if t not in remove_set])
-
-    # ── Files ───────────────────────────────────────────────
-
-    def insert_file(self, file_rec: FileRecord) -> int:
-        cur = self.conn.execute(
-            "INSERT INTO files(version_id, rel_path, size, sha256) VALUES(?, ?, ?, ?)",
-            (file_rec.version_id, file_rec.rel_path, file_rec.size, file_rec.sha256),
-        )
-        self.conn.commit()
-        return cur.lastrowid
-
-    def get_files(self, version_id: int) -> list[FileRecord]:
-        rows = self.conn.execute(
-            "SELECT * FROM files WHERE version_id = ? ORDER BY rel_path",
-            (version_id,),
-        ).fetchall()
-        return [
-            FileRecord(
-                id=r["id"], version_id=r["version_id"], rel_path=r["rel_path"],
-                size=r["size"], sha256=r["sha256"],
-            )
-            for r in rows
-        ]
-
     # ── Search ──────────────────────────────────────────────
-
-    def update_search_content(self, skill_id: int, content: str) -> None:
-        """No-op — kept for API compatibility."""
-        pass
 
     def search(self, query: str, repo: str | None = None) -> list[Skill]:
         """Search across name, description, category, and tags using LIKE."""
@@ -348,38 +252,22 @@ class Database:
         self.conn.commit()
 
     def list_categories(self) -> list[tuple[str, int]]:
-        """List all categories with skill counts. Returns [(category, count)]."""
+        """List all categories with skill counts."""
         rows = self.conn.execute(
             "SELECT COALESCE(NULLIF(category, ''), 'general') as cat, COUNT(*) as cnt "
             "FROM skills GROUP BY cat ORDER BY cat"
         ).fetchall()
         return [(r["cat"], r["cnt"]) for r in rows]
 
-    def list_skills_by_category(self, category: str) -> list[Skill]:
-        """List skills filtered by category."""
-        if category == "general":
-            rows = self.conn.execute(
-                "SELECT * FROM skills WHERE category = '' OR category = 'general' ORDER BY name"
-            ).fetchall()
-        else:
-            rows = self.conn.execute(
-                "SELECT * FROM skills WHERE category = ? ORDER BY name", (category,)
-            ).fetchall()
-        return [self._row_to_skill(row) for row in rows]
-
-    def vacuum(self) -> None:
-        self.conn.execute("VACUUM")
-
     def skill_count(self) -> int:
         row = self.conn.execute("SELECT COUNT(*) as cnt FROM skills").fetchone()
         return row["cnt"]
 
-    def version_count(self) -> int:
-        row = self.conn.execute("SELECT COUNT(*) as cnt FROM versions").fetchone()
-        return row["cnt"]
-
     def total_size(self) -> int:
         row = self.conn.execute(
-            "SELECT COALESCE(SUM(total_size), 0) as total FROM versions"
+            "SELECT COALESCE(SUM(total_size), 0) as total FROM skills"
         ).fetchone()
         return row["total"]
+
+    def vacuum(self) -> None:
+        self.conn.execute("VACUUM")

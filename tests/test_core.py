@@ -10,87 +10,32 @@ def test_library_init(tmp_library):
 
 
 def test_publish_and_info(tmp_library, sample_skill):
-    name, ver = tmp_library.publish(sample_skill)
+    name = tmp_library.publish(sample_skill)
     assert name == "my-skill"
-    assert ver == "v0.1"
 
     skill = tmp_library.info("my-skill")
     assert skill is not None
     assert skill.description == "A test skill for unit tests."
     assert "test" in skill.tags
     assert skill.author == "tester"
-    assert len(skill.versions) == 1
+    assert skill.commit  # has a commit hash
 
 
-def test_publish_auto_increment(tmp_library, sample_skill):
+def test_publish_idempotent(tmp_library, sample_skill):
+    """Publishing same skill twice updates rather than duplicates."""
     tmp_library.publish(sample_skill)
-    _, ver2 = tmp_library.publish(sample_skill)
-    assert ver2 == "v0.2"
+    tmp_library.publish(sample_skill)
 
-    skill = tmp_library.info("my-skill")
-    assert len(skill.versions) == 2
-
-
-def test_publish_explicit_version(tmp_library, sample_skill):
-    name, ver = tmp_library.publish(sample_skill, version="1.0.0")
-    assert ver == "1.0.0"
+    skills = tmp_library.list_skills()
+    # Should be one skill entry, not two
+    matching = [s for s in skills if "my-skill" in s.name]
+    assert len(matching) == 1
 
 
 def test_remove_skill(tmp_library, sample_skill):
     tmp_library.publish(sample_skill)
     assert tmp_library.remove("my-skill")
     assert tmp_library.info("my-skill") is None
-
-
-def test_remove_version(tmp_library, sample_skill):
-    tmp_library.publish(sample_skill)
-    tmp_library.publish(sample_skill)
-
-    assert tmp_library.remove("my-skill", version="v0.1")
-    skill = tmp_library.info("my-skill")
-    assert skill is not None
-    assert len(skill.versions) == 1
-
-
-def test_override(tmp_library, sample_skill, tmp_path):
-    tmp_library.publish(sample_skill)
-    skill = tmp_library.info("my-skill")
-    assert len(skill.versions) == 1
-    assert skill.versions[0].version == "v0.1"
-
-    # Modify the skill content
-    (sample_skill / "SKILL.md").write_text(
-        "# My Skill\n\nUpdated description.\n\n"
-        "<!-- skillm:meta\ntags: test, updated\nauthor: tester\n-->\n"
-    )
-    (sample_skill / "extra.txt").write_text("new file\n")
-
-    name, ver = tmp_library.override(sample_skill)
-    assert name == "my-skill"
-    assert ver == "v0.1"  # same version string
-
-    skill = tmp_library.info("my-skill")
-    assert len(skill.versions) == 1  # still one version
-    assert skill.description == "Updated description."
-
-
-def test_override_nonexistent(tmp_library, sample_skill):
-    import pytest
-    with pytest.raises(ValueError, match="not found"):
-        tmp_library.override(sample_skill)
-
-
-def test_publish_major_bump(tmp_library, sample_skill):
-    _, v1 = tmp_library.publish(sample_skill)
-    assert v1 == "v0.1"
-    _, v2 = tmp_library.publish(sample_skill)
-    assert v2 == "v0.2"
-    _, v3 = tmp_library.publish(sample_skill, major=True)
-    assert v3 == "v1.0"
-    _, v4 = tmp_library.publish(sample_skill)
-    assert v4 == "v1.1"
-    _, v5 = tmp_library.publish(sample_skill, major=True)
-    assert v5 == "v2.0"
 
 
 def test_search(tmp_library, sample_skill):
@@ -184,9 +129,10 @@ def test_rebuild(tmp_library, sample_skill):
 def test_project_add_drop(tmp_project, sample_skill):
     tmp_project.library.publish(sample_skill)
 
-    ver = tmp_project.add("my-skill")
-    assert ver == "v0.1"
-    assert (tmp_project.skills_dir / "my-skill" / "SKILL.md").exists()
+    result = tmp_project.add("my-skill")
+    assert result in ("linked", "copied")
+    assert (tmp_project.skills_dir / "my-skill" / "SKILL.md").exists() or \
+           (tmp_project.skills_dir / "my-skill").is_symlink()
 
     manifest = tmp_project.list_skills()
     assert "my-skill" in manifest
@@ -199,8 +145,8 @@ def test_project_soft_install(tmp_project, sample_skill):
     """Soft install creates a symlink to the library working tree."""
     tmp_project.library.publish(sample_skill)
 
-    ver = tmp_project.add("my-skill", soft=True)
-    assert ver == "latest"
+    result = tmp_project.add("my-skill", soft=True)
+    assert result == "linked"
 
     dest = tmp_project.skills_dir / "my-skill"
     assert dest.is_symlink()
@@ -236,23 +182,29 @@ def test_project_sync(tmp_project, sample_skill):
 
     # Simulate missing files
     import shutil
-    shutil.rmtree(tmp_project.skills_dir / "my-skill")
+    dest = tmp_project.skills_dir / "my-skill"
+    if dest.is_symlink():
+        dest.unlink()
+    else:
+        shutil.rmtree(dest)
 
     synced = tmp_project.sync()
     assert "my-skill" in synced
-    assert (tmp_project.skills_dir / "my-skill" / "SKILL.md").exists()
+    assert (tmp_project.skills_dir / "my-skill" / "SKILL.md").exists() or \
+           (tmp_project.skills_dir / "my-skill").is_symlink()
 
 
 def test_project_upgrade(tmp_project, sample_skill):
+    """Upgrade re-copies hard-installed skills."""
     tmp_project.library.publish(sample_skill)
-    tmp_project.add("my-skill")
+    tmp_project.add("my-skill", soft=False)
 
-    # Publish v2
+    # Publish again (updates the skill)
     tmp_project.library.publish(sample_skill)
 
     upgraded = tmp_project.upgrade()
     assert len(upgraded) == 1
-    assert upgraded[0] == ("my-skill", "v0.1", "v0.2")
+    assert upgraded[0] == "my-skill"
 
 
 def test_push_pull_via_git(tmp_path, sample_skill):
@@ -273,7 +225,6 @@ def test_push_pull_via_git(tmp_path, sample_skill):
     lib_a = Library(config_a)
     lib_a.init()
     lib_a.publish(sample_skill)
-    lib_a.publish(sample_skill)  # v0.2
     lib_a.backend.git.add_remote("origin", str(bare))
     lib_a.push()
 
@@ -286,11 +237,10 @@ def test_push_pull_via_git(tmp_path, sample_skill):
     lib_b.backend.git.add_remote("origin", str(bare))
     count = lib_b.pull()
 
-    # Both versions should be available (rebuild returns version count)
-    assert count == 2
+    # Should find 1 skill after pull
+    assert count == 1
     skill = lib_b.info("my-skill")
     assert skill is not None
-    assert len(skill.versions) == 2
 
 
 def test_project_enable_disable(tmp_project, sample_skill):

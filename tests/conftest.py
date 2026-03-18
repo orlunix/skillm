@@ -24,12 +24,13 @@ def sample_skill(tmp_path):
     skill_dir = tmp_path / "my-skill"
     skill_dir.mkdir()
     (skill_dir / "SKILL.md").write_text(
-        "# My Skill\n\n"
-        "A test skill for unit tests.\n\n"
-        "<!-- skillm:meta\n"
-        "tags: test, sample\n"
+        "---\n"
+        "name: my-skill\n"
+        "description: A test skill for unit tests.\n"
+        "tags: [test, sample]\n"
         "author: tester\n"
-        "-->\n\n"
+        "---\n\n"
+        "# My Skill\n\n"
         "## Instructions\n\n"
         "Do the thing.\n"
     )

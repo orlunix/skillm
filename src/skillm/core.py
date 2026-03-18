@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -13,42 +12,12 @@ from .backends.local import LocalBackend
 from .config import Config, load_config, save_config
 from .db import Database
 from .metadata import extract_metadata
-from .models import FileRecord, Skill, Version
+from .models import Skill
 from .repo import RepoManager
 from .snapshot import create_snapshot
 
 SKILLS_JSON = "skills.json"
 SKILLS_DIR = ".skills"
-
-_VERSION_RE = re.compile(r"^v(\d+)\.(\d+)$")
-
-
-def _next_version(existing: list, major: bool = False) -> str:
-    """Compute the next version string from existing versions.
-
-    Parses vMAJOR.MINOR format. If major=True, bumps major and resets minor.
-    Otherwise bumps minor of the latest major.
-
-    Falls back to v0.1 if no existing versions or unparseable.
-    """
-    if not existing:
-        return "v1.0" if major else "v0.1"
-
-    # Parse all version strings
-    max_major = 0
-    max_minor = 0
-    for v in existing:
-        m = _VERSION_RE.match(v.version)
-        if m:
-            maj, minor = int(m.group(1)), int(m.group(2))
-            if maj > max_major or (maj == max_major and minor > max_minor):
-                max_major = maj
-                max_minor = minor
-
-    if major:
-        return f"v{max_major + 1}.0"
-    else:
-        return f"v{max_major}.{max_minor + 1}"
 
 
 def get_library() -> "Library":
@@ -60,7 +29,7 @@ class Library:
     """Core library operations.
 
     Manages multiple git repos under ~/.skillm/repos/.
-    Each repo has its own branches (libraries) and tags (versions).
+    Each repo has its own branches (libraries).
     A single SQLite DB indexes skills across all repos.
     """
 
@@ -102,15 +71,11 @@ class Library:
         self.db.initialize()
         save_config(self.config)
 
-    def publish(
-        self,
-        source_dir: Path,
-        name: str | None = None,
-        version: str | None = None,
-        source: str | None = None,
-        major: bool = False,
-    ) -> tuple[str, str]:
-        """Publish a skill directory to the library. Returns (name, version)."""
+    def publish(self, source_dir: Path, name: str | None = None, source: str | None = None) -> str:
+        """Add a skill to the library. Returns skill name.
+
+        Idempotent: first call creates, subsequent calls update.
+        """
         self._snapshot()
         source_dir = source_dir.resolve()
         meta = extract_metadata(source_dir, name_override=name)
@@ -126,76 +91,37 @@ class Library:
 
         now = datetime.now(timezone.utc).isoformat()
 
-        # DB key includes library for cross-library uniqueness
-        db_name = f"{lib}/{skill_name}"
-
-        # Get or create skill record
-        skill = self.db.get_skill(db_name, repo=repo_name)
-        if skill is None:
-            skill_id = self.db.insert_skill(Skill(
-                repo=repo_name,
-                name=db_name,
-                description=meta.description,
-                category=meta.category,
-                author=meta.author,
-                source=skill_source,
-                created_at=now,
-                updated_at=now,
-            ))
-            skill = self.db.get_skill(db_name, repo=repo_name)
-        else:
-            skill.description = meta.description
-            skill.category = meta.category or skill.category
-            skill.author = meta.author
-            skill.source = skill_source or skill.source
-            skill.updated_at = now
-            self.db.update_skill(skill)
-            skill_id = skill.id
-
-        # Determine version (scoped to current library via git tags)
-        if version is None:
-            version = self.backend.git.next_version(skill_name, library=lib, major=major)
+        # Store files in repo and commit
+        commit_hash = self.backend.put_skill(skill_name, source_dir)
 
         # Collect file info
         files = list(source_dir.rglob("*"))
         files = [f for f in files if f.is_file()]
         total_size = sum(f.stat().st_size for f in files)
 
-        # Create version record
-        ver_id = self.db.insert_version(Version(
-            skill_id=skill_id,
-            version=version,
+        # DB key includes library for cross-library uniqueness
+        db_name = f"{lib}/{skill_name}"
+
+        skill_id = self.db.upsert_skill(Skill(
+            repo=repo_name,
+            name=db_name,
+            description=meta.description,
+            category=meta.category,
+            author=meta.author,
+            source=skill_source,
+            commit=commit_hash,
             file_count=len(files),
             total_size=total_size,
-            published_at=now,
+            updated_at=now,
         ))
 
-        # Record individual files
-        for f in files:
-            rel = f.relative_to(source_dir)
-            file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-            self.db.insert_file(FileRecord(
-                version_id=ver_id,
-                rel_path=str(rel),
-                size=f.stat().st_size,
-                sha256=file_hash,
-            ))
-
-        # Store files via backend
-        self.backend.put_skill_files(skill_name, version, source_dir)
-
-        # Update tags and search content
         if meta.tags:
             self.db.set_tags(skill_id, meta.tags)
-        self.db.update_search_content(skill_id, meta.content)
 
-        return skill_name, version
+        return skill_name
 
     def _db_name(self, name: str) -> str:
-        """Qualify a skill name with the current library for DB lookup.
-
-        If name already contains '/', it's already qualified.
-        """
+        """Qualify a skill name with the current library for DB lookup."""
         if "/" in name:
             return name
         return f"{self.current_library()}/{name}"
@@ -213,113 +139,32 @@ class Library:
             repo, name = name.split(":", 1)
 
         if "/" in name:
-            # Library-qualified
             return self.db.get_skill(name, repo=repo)
 
-        # Unqualified: try current library in active repo first
         db_name = f"{self.current_library()}/{name}"
         active = self.config.library.active_repo
         skill = self.db.get_skill(db_name, repo=active if not repo else repo)
         if skill:
             return skill
 
-        # Search across all repos for any library/name match
         return self.db.find_skill_by_short_name(name, repo=repo)
 
-    def override(self, source_dir: Path, name: str | None = None) -> tuple[str, str]:
-        """Override the latest version of an existing skill. Returns (name, version).
-
-        Raises ValueError if skill does not exist or has no versions.
-        """
-        self._snapshot()
-        source_dir = source_dir.resolve()
-        meta = extract_metadata(source_dir, name_override=name)
-        skill_name = meta.name
-        db_name = self._db_name(skill_name)
-        repo_name = self.config.library.active_repo
-
-        skill = self.db.get_skill(db_name, repo=repo_name)
-        if skill is None:
-            raise ValueError(f"Skill '{skill_name}' not found in library")
-
-        latest = self.db.get_latest_version(skill.id)
-        if latest is None:
-            raise ValueError(f"No versions found for '{skill_name}'")
-
-        version = latest.version
-
-        # Remove old version data (cascades to files table)
-        self.db.delete_version(skill.id, version)
-        self.backend.remove_skill_files(skill_name, version)
-
-        now = datetime.now(timezone.utc).isoformat()
-
-        # Update skill metadata
-        skill.description = meta.description
-        skill.category = meta.category or skill.category
-        skill.author = meta.author
-        skill.updated_at = now
-        self.db.update_skill(skill)
-
-        # Collect file info
-        files = list(source_dir.rglob("*"))
-        files = [f for f in files if f.is_file()]
-        total_size = sum(f.stat().st_size for f in files)
-
-        # Re-create version record with same version string
-        ver_id = self.db.insert_version(Version(
-            skill_id=skill.id,
-            version=version,
-            file_count=len(files),
-            total_size=total_size,
-            published_at=now,
-        ))
-
-        for f in files:
-            rel = f.relative_to(source_dir)
-            file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-            self.db.insert_file(FileRecord(
-                version_id=ver_id,
-                rel_path=str(rel),
-                size=f.stat().st_size,
-                sha256=file_hash,
-            ))
-
-        self.backend.put_skill_files(skill_name, version, source_dir)
-
-        if meta.tags:
-            self.db.set_tags(skill.id, meta.tags)
-        self.db.update_search_content(skill.id, meta.content)
-
-        return skill_name, version
-
-    def remove(self, name: str, version: str | None = None) -> bool:
-        """Remove a skill (or specific version) from the current library."""
+    def remove(self, name: str) -> bool:
+        """Remove a skill from the current library."""
         self._snapshot()
         skill = self._resolve_skill(name)
         if skill is None:
-            # Fallback: try with _db_name for backward compat
             db_name = self._db_name(name)
             repo_name = self.config.library.active_repo
             skill = self.db.get_skill(db_name, repo=repo_name)
             if skill is None:
                 return False
 
-        # Extract unqualified name for backend operations
         parts = skill.name.split("/")
         unqualified = parts[-1] if len(parts) > 1 else skill.name
 
-        if version:
-            self.db.delete_version(skill.id, version)
-            self.backend.remove_skill_files(unqualified, version)
-            # If no versions remain, remove the skill entirely
-            remaining = self.db.get_versions(skill.id)
-            if not remaining:
-                self.db.delete_skill(skill.name, repo=skill.repo)
-        else:
-            self.db.delete_skill(skill.name, repo=skill.repo)
-            self.backend.remove_skill_files(unqualified)
-
+        self.db.delete_skill(skill.name, repo=skill.repo)
+        self.backend.remove_skill(unqualified)
         return True
 
     def info(self, name: str) -> Skill | None:
@@ -346,7 +191,6 @@ class Library:
         self.backend.git.add(name)
         self.backend.git.commit(f"skillm: tag {name} +{','.join(tags)}")
 
-        # Keep DB in sync
         skill = self._resolve_skill(name)
         if skill:
             self.db.set_tags(skill.id, merged)
@@ -368,7 +212,6 @@ class Library:
         self.backend.git.add(name)
         self.backend.git.commit(f"skillm: untag {name} -{','.join(tags)}")
 
-        # Keep DB in sync
         skill = self._resolve_skill(name)
         if skill:
             self.db.set_tags(skill.id, remaining)
@@ -388,7 +231,6 @@ class Library:
         self.backend.git.add(name)
         self.backend.git.commit(f"skillm: categorize {name} → {category}")
 
-        # Keep DB in sync
         skill = self._resolve_skill(name)
         if skill:
             skill.category = category
@@ -396,7 +238,7 @@ class Library:
         return True
 
     def _get_scan_backends(self, repo: str | None = None) -> list[tuple[str, "LocalBackend"]]:
-        """Get backends to scan. If repo is specified, just that one; otherwise all."""
+        """Get backends to scan."""
         if repo:
             if not self.repo_mgr.repo_exists(repo):
                 raise ValueError(f"Repo '{repo}' not found")
@@ -404,12 +246,7 @@ class Library:
         return self.repo_mgr.get_all_backends()
 
     def find_skills_by_tag(self, tag: str, repo: str | None = None) -> list[tuple[str, "SkillMeta"]]:
-        """Find all skills that have a given tag.
-
-        Scans SKILL.md frontmatter in working trees.
-        If repo is specified, only scans that repo; otherwise scans all repos.
-        Returns list of (skill_name, SkillMeta).
-        """
+        """Find all skills that have a given tag."""
         from .metadata import scan_skill_dirs
         tag = tag.strip().lower()
         results = []
@@ -420,12 +257,7 @@ class Library:
         return results
 
     def find_skills_by_category(self, category: str, repo: str | None = None) -> list[tuple[str, "SkillMeta"]]:
-        """Find all skills that match a category.
-
-        Scans SKILL.md frontmatter in working trees.
-        If repo is specified, only scans that repo; otherwise scans all repos.
-        Returns list of (skill_name, SkillMeta).
-        """
+        """Find all skills that match a category."""
         from .metadata import scan_skill_dirs
         category = category.strip().lower()
         results = []
@@ -438,110 +270,73 @@ class Library:
     def stats(self) -> dict:
         return {
             "skills": self.db.skill_count(),
-            "versions": self.db.version_count(),
             "total_size": self.db.total_size(),
             "backend": self.config.library.backend,
             "path": str(self.config.library_path),
         }
 
     def rebuild(self) -> int:
-        """Rebuild database from skill files across all repos and libraries.
+        """Rebuild database from skill files across all repos.
 
-        Indexes skills from all repos and all libraries (git tags).
-        Returns total number of versions indexed.
+        Scans working trees for SKILL.md files.
+        Returns total number of skills indexed.
         """
         self.db.initialize()
 
-        # Clear existing data
-        self.db.conn.execute("DELETE FROM files")
-        self.db.conn.execute("DELETE FROM versions")
         self.db.conn.execute("DELETE FROM tags")
         self.db.conn.execute("DELETE FROM skills")
         self.db.conn.commit()
 
         count = 0
         for repo_name, backend in self.repo_mgr.get_all_backends():
-            by_library = backend.list_skill_dirs_by_library()
-            for lib, skills_list in by_library.items():
-                for name, versions in skills_list:
-                    for ver in versions:
-                        try:
-                            skill_dir = backend.get_skill_files(name, ver, library=lib)
-                            meta = extract_metadata(skill_dir)
-                            now = datetime.now(timezone.utc).isoformat()
+            lib = backend.current_library()
+            from .metadata import scan_skill_dirs
+            for name, meta in scan_skill_dirs(backend.skills_dir):
+                try:
+                    now = datetime.now(timezone.utc).isoformat()
+                    db_name = f"{lib}/{name}"
+                    commit_hash, _ = backend.skill_commit_info(name)
 
-                            # Always use library-qualified name in DB
-                            db_name = f"{lib}/{name}"
+                    skill_dir = backend.skills_dir / name
+                    files = [f for f in skill_dir.rglob("*") if f.is_file()]
+                    total_size = sum(f.stat().st_size for f in files)
 
-                            skill = self.db.get_skill(db_name, repo=repo_name)
-                            if skill is None:
-                                skill_id = self.db.insert_skill(Skill(
-                                    repo=repo_name,
-                                    name=db_name, description=meta.description,
-                                    category=meta.category, author=meta.author,
-                                    source=lib,
-                                    created_at=now, updated_at=now,
-                                ))
-                            else:
-                                skill_id = skill.id
+                    skill_id = self.db.insert_skill(Skill(
+                        repo=repo_name,
+                        name=db_name,
+                        description=meta.description,
+                        category=meta.category,
+                        author=meta.author,
+                        commit=commit_hash,
+                        file_count=len(files),
+                        total_size=total_size,
+                        updated_at=now,
+                    ))
 
-                            files = [f for f in skill_dir.rglob("*") if f.is_file()]
-                            total_size = sum(f.stat().st_size for f in files)
+                    if meta.tags:
+                        self.db.set_tags(skill_id, meta.tags)
 
-                            ver_id = self.db.insert_version(Version(
-                                skill_id=skill_id, version=ver, file_count=len(files),
-                                total_size=total_size, published_at=now,
-                            ))
-
-                            for f in files:
-                                rel = f.relative_to(skill_dir)
-                                file_hash = hashlib.sha256(f.read_bytes()).hexdigest()
-                                self.db.insert_file(FileRecord(
-                                    version_id=ver_id, rel_path=str(rel),
-                                    size=f.stat().st_size, sha256=file_hash,
-                                ))
-
-                            if meta.tags:
-                                self.db.set_tags(skill_id, meta.tags)
-                            self.db.update_search_content(skill_id, meta.content)
-
-                            count += 1
-                        except Exception:
-                            continue
+                    count += 1
+                except Exception:
+                    continue
 
         return count
-
-    def get_skill_files_path(self, name: str, version: str, library: str | None = None) -> Path:
-        """Get path to skill files in the library."""
-        return self.backend.get_skill_files(name, version, library=library)
 
     # ── Library (branch) operations ──────────────────────────
 
     def current_library(self) -> str:
-        """Get the active library name (= current git branch)."""
         return self.backend.current_library()
 
     def create_library(self, name: str, orphan: bool = False) -> None:
-        """Create a new library branch.
-
-        If orphan=True, starts empty. Otherwise forks from current branch.
-        """
         self.backend.create_library(name, orphan=orphan)
 
     def switch_library(self, name: str, reset: bool = False) -> None:
-        """Switch to a different library.
-
-        If reset=True, hard-resets the branch to match its remote tracking
-        state (or first commit if no remote).
-        """
         self.backend.switch_library(name, reset=reset)
 
     def delete_library(self, name: str) -> None:
-        """Delete a library. Cannot delete the active library."""
         self.backend.delete_library(name)
 
     def list_libraries(self) -> list[str]:
-        """List all local library names."""
         return self.backend.list_libraries()
 
     # ── Repo operations ──────────────────────────────────────
@@ -553,17 +348,14 @@ class Library:
         self.rebuild()
 
     def init_repo(self, name: str) -> None:
-        """Create a local-only repo (no remote)."""
         self.repo_mgr.init_repo(name)
 
     def remove_repo(self, name: str) -> None:
-        """Remove a repo. Cannot remove the active repo."""
         if name == self.config.library.active_repo:
             raise ValueError(f"Cannot remove active repo '{name}'. Switch first.")
         self.repo_mgr.remove_repo(name)
 
     def switch_repo(self, name: str) -> None:
-        """Switch to a different repo."""
         if not self.repo_mgr.repo_exists(name):
             raise ValueError(f"Repo '{name}' not found")
         self.config.library.active_repo = name
@@ -571,26 +363,17 @@ class Library:
         save_config(self.config)
 
     def list_repos(self):
-        """List all repos."""
         return self.repo_mgr.list_repos()
 
     # ── Push / Pull ──────────────────────────────────────────
 
     def push(self, repo_name: str | None = None, as_branch: str | None = None) -> str:
-        """Push a repo to its origin.
-
-        If repo_name is None, pushes the active repo.
-        """
         if repo_name is None:
             repo_name = self.config.library.active_repo
         backend = self.repo_mgr.get_backend(repo_name)
         return backend.git_push(as_branch=as_branch)
 
     def pull(self, repo_name: str | None = None) -> int:
-        """Pull from a repo's origin and rebuild the database.
-
-        Returns the number of versions indexed after rebuild.
-        """
         if repo_name is None:
             repo_name = self.config.library.active_repo
         backend = self.repo_mgr.get_backend(repo_name)
@@ -614,9 +397,6 @@ class Project:
     Skills are installed into agent-specific directories:
       .claude/skills/my-skill/
       .cursor/skills/my-skill/
-      .codex/skills/my-skill/
-
-    The manifest (skills.json) lives in the agent directory.
     """
 
     def __init__(
@@ -635,14 +415,12 @@ class Project:
         self.skills_json = self.agent_dir / SKILLS_JSON
 
     def _ensure_dirs(self) -> None:
-        """Create agent and skills directories if they don't exist."""
         self.agent_dir.mkdir(exist_ok=True)
         self.skills_dir.mkdir(exist_ok=True)
         if not self.skills_json.exists():
             self.skills_json.write_text(json.dumps({"skills": {}}, indent=2) + "\n")
 
     def init(self) -> None:
-        """Initialize project for skill consumption."""
         self._ensure_dirs()
 
     def _load_manifest(self) -> dict:
@@ -654,22 +432,16 @@ class Project:
         self.skills_json.write_text(json.dumps(manifest, indent=2) + "\n")
 
     def find_skill_conflicts(self, skill_name: str) -> list[Path]:
-        """Check if a skill exists in parent directories or global config.
-
-        Scans from project_dir upward to home, plus ~/.{agent}/skills/.
-        Returns list of paths where the skill already exists.
-        """
+        """Check if a skill exists in parent directories or global config."""
         conflicts = []
         home = Path.home()
         agent_dir_name = AGENT_DIRS.get(self.agent, f".{self.agent}")
 
-        # Check global (~/.claude/skills/)
         global_dest = home / agent_dir_name / "skills" / skill_name
         if global_dest.exists() or global_dest.is_symlink():
             if global_dest.resolve() != (self.skills_dir / skill_name).resolve():
                 conflicts.append(global_dest)
 
-        # Check parent directories (up to home, excluding current project)
         current = self.project_dir.parent
         while current != home.parent and current != current.parent:
             parent_dest = current / agent_dir_name / "skills" / skill_name
@@ -680,12 +452,11 @@ class Project:
 
         return conflicts
 
-    def add(self, name: str, version: str | None = None, pin: bool = False, soft: bool = False) -> str:
-        """Add a skill from library to project. Returns installed version.
+    def add(self, name: str, pin: bool = False, soft: bool = False) -> str:
+        """Add a skill from library to project. Returns 'linked' or commit hash.
 
         If soft=True, creates a symlink to the skill directory in the repo
-        working tree instead of copying files. The skill always reflects the
-        latest state in the library (no need to upgrade).
+        working tree instead of copying files.
         """
         self._ensure_dirs()
 
@@ -701,62 +472,49 @@ class Project:
         dest = self.skills_dir / skill_name
 
         if soft:
-            # Soft install: symlink to skill dir in repo working tree
             backend = self.library.backend
             src = backend.skills_dir / skill_name
             if not src.exists():
                 raise ValueError(f"Skill '{skill_name}' not found in working tree")
 
-            if dest.exists() or dest.is_symlink():
-                if dest.is_symlink():
-                    dest.unlink()
-                else:
-                    shutil.rmtree(dest)
+            if dest.is_symlink():
+                dest.unlink()
+            elif dest.exists():
+                shutil.rmtree(dest)
             dest.symlink_to(src)
-
-            version = "latest"
+            installed = "linked"
         else:
-            # Hard install: copy files
+            # Hard install: copy from working tree
             skill = self.library.info(name)
             if skill is None:
-                raise ValueError(f"Skill '{name}' not found in library")
-
-            if version is None or version == "latest":
-                ver = self.library.db.get_latest_version(skill.id)
-                if ver is None:
-                    raise ValueError(f"No versions found for '{name}'")
-                version = ver.version
+                # Try directly from working tree
+                src = self.library.backend.skills_dir / skill_name
+                if not src.exists():
+                    raise ValueError(f"Skill '{name}' not found in library")
             else:
-                ver = self.library.db.get_version(skill.id, version)
-                if ver is None:
-                    raise ValueError(f"Version '{version}' not found for '{name}'")
+                if skill.repo and self.library.repo_mgr.repo_exists(skill.repo):
+                    backend = self.library.repo_mgr.get_backend(skill.repo)
+                else:
+                    backend = self.library.backend
+                src = backend.skills_dir / skill_name
 
-            # Determine which backend to use for file extraction
-            if skill.repo and self.library.repo_mgr.repo_exists(skill.repo):
-                backend = self.library.repo_mgr.get_backend(skill.repo)
-            else:
-                backend = self.library.backend
-
-            src = backend.get_skill_files(skill_name, version, library=lib_name)
             if dest.is_symlink():
                 dest.unlink()
             elif dest.exists():
                 shutil.rmtree(dest)
             shutil.copytree(src, dest)
+            installed = "copied"
 
-        # Update manifest
         manifest = self._load_manifest()
         manifest["skills"][name] = {
-            "version": version,
-            "pinned": pin,
             "soft": soft,
+            "pinned": pin,
         }
         self._save_manifest(manifest)
 
-        return version
+        return installed
 
     def drop(self, name: str) -> bool:
-        """Remove a skill from the project."""
         manifest = self._load_manifest()
         if name not in manifest["skills"]:
             return False
@@ -773,21 +531,20 @@ class Project:
         return True
 
     def sync(self) -> list[str]:
-        """Install missing skills from skills.json. Returns list of synced skill names."""
+        """Install missing skills from skills.json."""
         manifest = self._load_manifest()
         synced = []
 
         for name, info in manifest["skills"].items():
             dest = self.skills_dir / name
             if not dest.exists():
-                version = info.get("version")
-                self.add(name, version=version, pin=info.get("pinned", False))
+                self.add(name, pin=info.get("pinned", False), soft=info.get("soft", False))
                 synced.append(name)
 
         return synced
 
-    def upgrade(self, name: str | None = None) -> list[tuple[str, str, str]]:
-        """Upgrade skills to latest versions. Returns list of (name, old_ver, new_ver)."""
+    def upgrade(self, name: str | None = None) -> list[str]:
+        """Re-copy hard-installed skills from library. Returns list of upgraded skill names."""
         manifest = self._load_manifest()
         upgraded = []
 
@@ -796,27 +553,16 @@ class Project:
         for skill_name in targets:
             if skill_name not in manifest["skills"]:
                 continue
-
             info = manifest["skills"][skill_name]
-            if info.get("pinned", False):
+            if info.get("soft", False) or info.get("pinned", False):
                 continue
 
-            old_version = info["version"]
-            skill = self.library.info(skill_name)
-            if skill is None:
-                continue
-
-            latest = self.library.db.get_latest_version(skill.id)
-            if latest is None or latest.version == old_version:
-                continue
-
-            self.add(skill_name, version=latest.version, pin=info.get("pinned", False))
-            upgraded.append((skill_name, old_version, latest.version))
+            self.add(skill_name, pin=False, soft=False)
+            upgraded.append(skill_name)
 
         return upgraded
 
     def list_skills(self) -> dict:
-        """List skills in the project manifest."""
         return self._load_manifest().get("skills", {})
 
     def enable(self, name: str) -> bool:

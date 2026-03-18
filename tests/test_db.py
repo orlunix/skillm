@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from skillm.db import Database
-from skillm.models import Skill, Version, FileRecord
+from skillm.models import Skill
 
 
 def test_initialize(tmp_path):
@@ -19,7 +19,7 @@ def test_skill_crud(tmp_path):
     # Insert
     skill_id = db.insert_skill(Skill(
         name="test-skill", description="A test", author="me",
-        created_at="2026-01-01", updated_at="2026-01-01",
+        updated_at="2026-01-01",
     ))
     assert skill_id > 0
 
@@ -46,31 +46,30 @@ def test_skill_crud(tmp_path):
     db.close()
 
 
-def test_versions(tmp_path):
+def test_upsert(tmp_path):
     db = Database(tmp_path / "test.db")
     db.initialize()
 
-    skill_id = db.insert_skill(Skill(
-        name="s", created_at="2026-01-01", updated_at="2026-01-01",
+    # First insert
+    skill_id = db.upsert_skill(Skill(
+        repo="local", name="upsert-skill", description="Original",
+        updated_at="2026-01-01", commit="abc123",
     ))
+    assert skill_id > 0
 
-    db.insert_version(Version(
-        skill_id=skill_id, version="v1", file_count=2,
-        total_size=1024, published_at="2026-01-01",
+    # Upsert same skill — should update, not insert
+    skill_id2 = db.upsert_skill(Skill(
+        repo="local", name="upsert-skill", description="Updated",
+        updated_at="2026-01-02", commit="def456",
     ))
-    db.insert_version(Version(
-        skill_id=skill_id, version="v2", file_count=3,
-        total_size=2048, published_at="2026-01-02",
-    ))
+    assert skill_id2 == skill_id
 
-    versions = db.get_versions(skill_id)
-    assert len(versions) == 2
+    skill = db.get_skill("upsert-skill", repo="local")
+    assert skill.description == "Updated"
+    assert skill.commit == "def456"
 
-    latest = db.get_latest_version(skill_id)
-    assert latest.version == "v2"
-
-    assert db.delete_version(skill_id, "v1")
-    assert len(db.get_versions(skill_id)) == 1
+    # Only one skill in DB
+    assert db.skill_count() == 1
     db.close()
 
 
@@ -79,19 +78,18 @@ def test_tags(tmp_path):
     db.initialize()
 
     skill_id = db.insert_skill(Skill(
-        name="s", created_at="2026-01-01", updated_at="2026-01-01",
+        name="s", updated_at="2026-01-01",
     ))
 
     db.set_tags(skill_id, ["web", "scraping"])
     assert db.get_tags(skill_id) == ["scraping", "web"]
 
-    db.add_tags(skill_id, ["python"])
-    assert "python" in db.get_tags(skill_id)
-
-    db.remove_tags(skill_id, ["web"])
+    # Replace tags
+    db.set_tags(skill_id, ["python", "scraping"])
     tags = db.get_tags(skill_id)
-    assert "web" not in tags
+    assert "python" in tags
     assert "scraping" in tags
+    assert "web" not in tags
     db.close()
 
 
@@ -101,9 +99,9 @@ def test_search(tmp_path):
 
     skill_id = db.insert_skill(Skill(
         name="web-scraper", description="Scrape websites",
-        created_at="2026-01-01", updated_at="2026-01-01",
+        updated_at="2026-01-01",
     ))
-    db.add_tags(skill_id, ["python", "httpx"])
+    db.set_tags(skill_id, ["python", "httpx"])
 
     # Search by description
     results = db.search("scrape")
@@ -120,21 +118,51 @@ def test_search(tmp_path):
     db.close()
 
 
-def test_files(tmp_path):
+def test_categories(tmp_path):
     db = Database(tmp_path / "test.db")
     db.initialize()
 
-    skill_id = db.insert_skill(Skill(
-        name="s", created_at="2026-01-01", updated_at="2026-01-01",
-    ))
-    ver_id = db.insert_version(Version(
-        skill_id=skill_id, version="v1", published_at="2026-01-01",
-    ))
+    db.insert_skill(Skill(name="a", category="infra", updated_at="2026-01-01"))
+    db.insert_skill(Skill(name="b", category="infra", updated_at="2026-01-01"))
+    db.insert_skill(Skill(name="c", category="dev", updated_at="2026-01-01"))
 
-    db.insert_file(FileRecord(
-        version_id=ver_id, rel_path="SKILL.md", size=100, sha256="abc123",
-    ))
-    files = db.get_files(ver_id)
-    assert len(files) == 1
-    assert files[0].rel_path == "SKILL.md"
+    cats = db.list_categories()
+    assert len(cats) == 2
+    cat_dict = dict(cats)
+    assert cat_dict["infra"] == 2
+    assert cat_dict["dev"] == 1
+    db.close()
+
+
+def test_repo_filtering(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+
+    db.insert_skill(Skill(repo="origin", name="s1", updated_at="2026-01-01"))
+    db.insert_skill(Skill(repo="team", name="s2", updated_at="2026-01-01"))
+
+    # Filter by repo
+    origin_skills = db.list_skills(repo="origin")
+    assert len(origin_skills) == 1
+    assert origin_skills[0].name == "s1"
+
+    # All repos
+    all_skills = db.list_skills()
+    assert len(all_skills) == 2
+    db.close()
+
+
+def test_find_skill_by_short_name(tmp_path):
+    db = Database(tmp_path / "test.db")
+    db.initialize()
+
+    db.insert_skill(Skill(repo="local", name="main/deploy-k8s", updated_at="2026-01-01"))
+
+    # Find by short name
+    skill = db.find_skill_by_short_name("deploy-k8s")
+    assert skill is not None
+    assert skill.name == "main/deploy-k8s"
+
+    # Not found
+    assert db.find_skill_by_short_name("nonexistent") is None
     db.close()
