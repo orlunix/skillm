@@ -642,7 +642,22 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
         return
 
     if not name:
-        console.print("[red]Provide a skill name, --tag, or --category[/red]")
+        # No name: install all skills from specified repo or active repo
+        from .metadata import scan_skill_dirs
+        target_repo = repo or lib.config.library.active_repo
+        backend = lib.repo_mgr.get_backend(target_repo)
+        all_skills = scan_skill_dirs(backend.skills_dir)
+        if not all_skills:
+            console.print(f"[dim]No skills found in repo '{target_repo}'[/dim]")
+            return
+        for skill_name, meta in all_skills:
+            try:
+                ver = project.add(skill_name, pin=pin, soft=soft)
+                label = f"→ linked" if soft else f"@{ver}"
+                console.print(f"[green]Installed {skill_name} {label}[/green]")
+            except Exception as e:
+                console.print(f"[red]{skill_name}: {e}[/red]")
+        console.print(f"[green]{len(all_skills)} skill(s) installed from '{target_repo}' ({mode})[/green]")
         return
 
     version = None
