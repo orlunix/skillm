@@ -611,6 +611,11 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
     soft = not hard
     mode = "hard" if hard else "soft"
 
+    def _warn_conflicts(skill_name):
+        conflicts = project.find_skill_conflicts(skill_name)
+        for p in conflicts:
+            console.print(f"[yellow]Warning: '{skill_name}' already exists at {p} — agent may load duplicates[/yellow]")
+
     if install_tag:
         matches = lib.find_skills_by_tag(install_tag, repo=repo)
         if not matches:
@@ -618,6 +623,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in matches:
             try:
+                _warn_conflicts(skill_name)
                 ver = project.add(skill_name, pin=pin, soft=soft)
                 label = f"→ linked" if soft else f"@{ver}"
                 console.print(f"[green]Installed {skill_name} {label}[/green]")
@@ -633,6 +639,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in matches:
             try:
+                _warn_conflicts(skill_name)
                 ver = project.add(skill_name, pin=pin, soft=soft)
                 label = f"→ linked" if soft else f"@{ver}"
                 console.print(f"[green]Installed {skill_name} {label}[/green]")
@@ -652,6 +659,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
             return
         for skill_name, meta in all_skills:
             try:
+                _warn_conflicts(skill_name)
                 ver = project.add(skill_name, pin=pin, soft=soft)
                 label = f"→ linked" if soft else f"@{ver}"
                 console.print(f"[green]Installed {skill_name} {label}[/green]")
@@ -665,6 +673,7 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
         name, version = name.rsplit("@", 1)
         soft = False  # specific version requires hard install
 
+    _warn_conflicts(name.split("/")[-1] if "/" in name else name.split(":")[-1] if ":" in name else name)
     ver = project.add(name, version=version, pin=pin, soft=soft)
     scope = "globally" if global_install else "to project"
     if soft:
@@ -685,16 +694,35 @@ def install_cmd(name: str | None, pin: bool, hard: bool, global_install: bool, i
 
 
 @cli.command("uninstall")
-@click.argument("name")
+@click.argument("name", required=False, default=None)
 @click.option("-g", "--global", "global_install", is_flag=True, help="Uninstall from global agent config")
 @_agent_option
 @_root_option
-def uninstall_cmd(name: str, global_install: bool, agent: str, project_root: str | None):
-    """Uninstall a skill from this project (or globally)."""
+def uninstall_cmd(name: str | None, global_install: bool, agent: str, project_root: str | None):
+    """Uninstall skills from this project (or globally).
+
+    \b
+    skillm uninstall deploy-k8s        Uninstall one skill
+    skillm uninstall                   Uninstall all skills
+    skillm uninstall -g                Uninstall all global skills
+    """
     if global_install:
         from pathlib import Path
         project_root = str(Path.home())
     project = _get_project(agent=agent, project_root=project_root)
+
+    if not name:
+        # Uninstall all
+        skills = list(project.list_skills().keys())
+        if not skills:
+            console.print("[dim]No skills installed[/dim]")
+            return
+        for skill_name in skills:
+            project.drop(skill_name)
+            console.print(f"[green]Uninstalled {skill_name}[/green]")
+        console.print(f"[green]{len(skills)} skill(s) uninstalled[/green]")
+        return
+
     if project.drop(name):
         console.print(f"[green]Uninstalled {name}[/green]")
     else:

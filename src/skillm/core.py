@@ -653,6 +653,33 @@ class Project:
     def _save_manifest(self, manifest: dict) -> None:
         self.skills_json.write_text(json.dumps(manifest, indent=2) + "\n")
 
+    def find_skill_conflicts(self, skill_name: str) -> list[Path]:
+        """Check if a skill exists in parent directories or global config.
+
+        Scans from project_dir upward to home, plus ~/.{agent}/skills/.
+        Returns list of paths where the skill already exists.
+        """
+        conflicts = []
+        home = Path.home()
+        agent_dir_name = AGENT_DIRS.get(self.agent, f".{self.agent}")
+
+        # Check global (~/.claude/skills/)
+        global_dest = home / agent_dir_name / "skills" / skill_name
+        if global_dest.exists() or global_dest.is_symlink():
+            if global_dest.resolve() != (self.skills_dir / skill_name).resolve():
+                conflicts.append(global_dest)
+
+        # Check parent directories (up to home, excluding current project)
+        current = self.project_dir.parent
+        while current != home.parent and current != current.parent:
+            parent_dest = current / agent_dir_name / "skills" / skill_name
+            if parent_dest.exists() or parent_dest.is_symlink():
+                if parent_dest.resolve() != (self.skills_dir / skill_name).resolve():
+                    conflicts.append(parent_dest)
+            current = current.parent
+
+        return conflicts
+
     def add(self, name: str, version: str | None = None, pin: bool = False, soft: bool = False) -> str:
         """Add a skill from library to project. Returns installed version.
 
